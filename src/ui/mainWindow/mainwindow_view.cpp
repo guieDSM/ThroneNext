@@ -1,0 +1,380 @@
+#include "include/ui/mainwindow.h"
+#include "NkrVersion.h"
+
+#include <QApplication>
+#include <QHeaderView>
+#include <QScrollBar>
+#include <QTimer>
+#include <QToolButton>
+
+#include "include/api/RPC.h"
+#include "include/database/GroupsRepo.h"
+#include "include/database/RoutesRepo.h"
+#include "include/stats/autoselector/AutoSelectorMonitor.hpp"
+#include "include/ui/setting/Icon.hpp"
+#include "include/ui/stats/dialog_auto_selector.h"
+#include "include/ui/utils/ProfilesTableFilterHeader.h"
+#include "include/ui/utils/ProfilesTableModel.h"
+#include "include/ui/widget/StartStopButton.hpp"
+
+void MainWindow::applyTopBarMetrics() {
+    // Give the menu toolButtons a uniform width (the widest one's) so the top
+    // bar reads as an even row. The start/stop button keeps its own square size.
+    const QList<QToolButton*> menuButtons = {
+        ui->toolButton_program, ui->toolButton_preferences, ui->toolButton_testing,
+        ui->toolButton_routing, quickRouteButton_, ui->toolButton_tools,
+        ui->toolButton_group_test,
+    };
+    // Drop the previous run's floor first: a stale minimum would otherwise be
+    // baked into minimumSizeHint() below and never shrink back.
+    for (auto* b : menuButtons) {
+        b->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
+        b->setMinimumWidth(0);
+        b->setMinimumHeight(0);
+    }
+
+    // Content width only: the chevron already clears the label via ::menu-indicator, so
+    // reserving arrow padding would widen all five for a gap only the widest needs.
+    int uniformButtonWidth = 0;
+    int regularButtonHeight = 0;
+    for (auto* b : menuButtons) {
+        b->ensurePolished();
+        uniformButtonWidth = qMax(uniformButtonWidth, b->sizeHint().width());
+    }
+    regularButtonHeight = ui->toolButton_program->sizeHint().height();
+    for (auto* b : menuButtons) {
+        b->setFixedWidth(uniformButtonWidth);
+        b->setFixedHeight(regularButtonHeight);
+    }
+    ui->toolButton_startstop->setFixedHeight(regularButtonHeight);
+
+    // Translated labels (RU runs ~2x English) outgrow the designed 800x600 floor and
+    // clip the widgets after it, so follow what the layout actually needs (#1665).
+    const QSize contentMin = minimumSizeHint();
+    setMinimumSize(qMax(designMinimumSize.width(), contentMin.width()),
+                   qMax(designMinimumSize.height(), contentMin.height()));
+}
+
+void MainWindow::UpdateDataView(bool force)
+{
+    const auto now = QDateTime::currentMSecsSinceEpoch();
+    if (!force && now - lastUpdatedMs.load() < 100)
+    {
+        return;
+    }
+    auto html = dataViewHtmlGenerator_.buildHtml();
+    runOnUiThread([=, this] {
+        ui->data_view->setHtml(html);
+    }, true);
+    lastUpdatedMs.store(QDateTime::currentMSecsSinceEpoch());
+}
+
+void MainWindow::setDownloadReport(const DownloadProgressReport& report, bool show)
+{
+    dataViewHtmlGenerator_.setDownloadReport(report, show);
+}
+
+void MainWindow::refresh_auto_selector_view()
+{
+    const auto view = Stats::autoSelectorMonitor->Snapshot();
+    dataViewHtmlGenerator_.setAutoSelectorStatus(view.valid ? view.summary() : QString(),
+                                                 view.valid ? view.detail() : QString());
+    // The Tools entry only makes sense while a selector is actually running.
+    ui->actionAuto_Selector->setVisible(view.valid);
+    UpdateDataView();
+    if (m_autoSelectorDialog != nullptr) m_autoSelectorDialog->refresh();
+}
+
+void MainWindow::updateLogFilterFields() {
+    QMutexLocker locker(&logMutex);
+    includeKeywords.clear();
+    excludeKeywords.clear();
+    for (const auto& inKeyword : Configs::dataManager->settingsRepo->log_include_keyword) includeKeywords.append(inKeyword);
+    for (const auto& exKeyword : Configs::dataManager->settingsRepo->log_exclude_keyword) excludeKeywords.append(exKeyword);
+    includeCombined.setPattern(Configs::dataManager->settingsRepo->log_include_regex.join("|"));
+    excludeCombined.setPattern(Configs::dataManager->settingsRepo->log_exclude_regex.join("|"));
+    includeCombined.optimize();
+    excludeCombined.optimize();
+}
+
+void MainWindow::applyProfileFilters()
+{
+    if (!profilesFilterModel) return;
+    profilesFilterModel->setFilters(typeFilterString, addressFilterString, nameFilterString, countryFilterString);
+    refresh_proxy_list_column_size();
+}
+
+void MainWindow::refresh_status(const QString &traffic_update) {
+    const auto* settings = Configs::dataManager->settingsRepo.get();
+
+    auto refresh_speed_label = [=,this] {
+        if (settings->disable_traffic_stats) {
+            ui->label_speed->setText("");
+        }
+        else if (traffic_update_cache == "") {
+            ui->label_speed->setText(QObject::tr("Proxy: %1\nDirect: %2").arg("", ""));
+        } else {
+            ui->label_speed->setText(traffic_update_cache);
+        }
+    };
+
+    // From TrafficLooper
+    if (!traffic_update.isEmpty() && !settings->disable_traffic_stats) {
+        traffic_update_cache = traffic_update;
+        if (traffic_update == "STOP") {
+            traffic_update_cache = "";
+        } else {
+            refresh_speed_label();
+            return;
+        }
+    }
+
+    refresh_speed_label();
+
+    // From UI
+    QString group_name;
+    if (running != nullptr) {
+        auto group = Configs::dataManager->groupsRepo->GetGroup(running->gid);
+        if (group != nullptr) group_name = group->name;
+    }
+
+    if (QDateTime::currentSecsSinceEpoch() - last_test_time > 2) {
+        QString runningLabelText;
+        if (running) {
+            runningLabelText = QString("[%1] %2").arg(group_name, running->outbound->DisplayName());
+            if (!running->runningCountryInfo.isEmpty()) {
+                runningLabelText += "\n" + running->runningCountryInfo;
+            }
+        } else {
+            runningLabelText = tr("Not Running");
+        }
+        ui->label_running->setText(runningLabelText);
+    }
+    //
+    const auto display_socks = DisplayAddress(settings->inbound_address, settings->inbound_socks_port);
+    const auto inbound_disabled = settings->disable_mixed_inbound;
+    const auto inbound_txt = QString("Mixed: %1").arg(inbound_disabled ? "Disabled" : display_socks);
+    ui->label_inbound->setText(inbound_txt);
+    //
+    ui->checkBox_VPN->setChecked(settings->spmode_vpn);
+    ui->checkBox_SystemProxy->setChecked(settings->spmode_system_proxy);
+    if (select_mode) {
+        ui->label_running->setText(tr("Select") + " *");
+        ui->label_running->setToolTip(tr("Select mode, double-click or press Enter to select a profile, press ESC to exit."));
+    } else {
+        ui->label_running->setToolTip({});
+    }
+
+    const auto route = Configs::dataManager->routesRepo->GetRouteProfile(settings->current_route_id);
+    const QString activeRouteName = (route && route->name != "Default") ? route->name : "";
+
+    auto make_title = [=,this](bool isTray) {
+        QStringList tt;
+        if (!isTray && Configs::IsAdmin()) tt << "[Admin]";
+        if (select_mode) tt << "[" + tr("Select") + "]";
+        if (!title_error.isEmpty()) tt << "[" + title_error + "]";
+        if (settings->spmode_vpn && !settings->spmode_system_proxy) tt << "[Tun]";
+        if (!settings->spmode_vpn && settings->spmode_system_proxy) tt << "[" + tr("System Proxy") + "]";
+        if (settings->spmode_vpn && settings->spmode_system_proxy) tt << "[Tun+" + tr("System Proxy") + "]";
+        tt << software_name;
+        if (!isTray) tt << QString(NKR_VERSION);
+        if (!activeRouteName.isEmpty()) {
+            tt << "[" + activeRouteName + "]";
+        }
+        if (running != nullptr) {
+            tt << running->outbound->DisplayTypeAndName() + "@" + group_name;
+            if (!running->runningCountryInfo.isEmpty()) {
+                tt << running->runningCountryInfo;
+            }
+        }
+        return tt.join(isTray ? "\n" : " ");
+    };
+
+    auto icon_status_new = Icon::NONE;
+
+    if (running != nullptr) {
+        if (settings->spmode_vpn) {
+            icon_status_new = Icon::VPN;
+        } else if (settings->system_dns_set && settings->spmode_system_proxy) {
+            icon_status_new = Icon::SYSTEM_PROXY_DNS;
+        } else if (settings->system_dns_set) {
+            icon_status_new = Icon::DNS;
+        } else if (settings->spmode_system_proxy) {
+            icon_status_new = Icon::SYSTEM_PROXY;
+        } else {
+            icon_status_new = Icon::RUNNING;
+        }
+    }
+
+    // refresh title & window icon
+    setWindowTitle(make_title(false));
+    if (icon_status_new != icon_status) QApplication::setWindowIcon(GetTrayIcon(icon_status_new));
+
+    // refresh tray
+    if (tray != nullptr) {
+        tray->setToolTip(make_title(true));
+        if (icon_status_new != icon_status) tray->setIcon(Icon::GetTrayIcon(icon_status_new));
+    }
+
+    icon_status = icon_status_new;
+
+    refresh_startstop_button();
+}
+
+void MainWindow::refresh_startstop_button() {
+    auto *btn = ui->toolButton_startstop;
+    if (btn == nullptr) return;
+
+    const auto &settings = Configs::dataManager->settingsRepo;
+
+    // Ring colour reflects the active proxy mode (mirrors the tray-icon logic
+    // above); it only shows while running.
+    auto mode = StartStopButton::Mode::Off;
+    if (running != nullptr) {
+        if (settings->spmode_vpn) mode = StartStopButton::Mode::Tun;
+        else if (settings->system_dns_set && settings->spmode_system_proxy) mode = StartStopButton::Mode::SystemProxyDns;
+        else if (settings->system_dns_set) mode = StartStopButton::Mode::Dns;
+        else if (settings->spmode_system_proxy) mode = StartStopButton::Mode::SystemProxy;
+        else mode = StartStopButton::Mode::Core;
+    }
+    btn->setMode(mode);
+
+    StartStopButton::State state;
+    if (m_profileConnecting) state = StartStopButton::State::Connecting;
+    else if (m_profileDisconnecting) state = StartStopButton::State::Disconnecting;
+    else if (running != nullptr) state = StartStopButton::State::Running;
+    else if (get_profile_to_start() >= 0) state = StartStopButton::State::Idle;
+    else state = StartStopButton::State::Disabled;
+    btn->setState(state);
+}
+
+void MainWindow::update_traffic_graph(int proxyDl, int proxyUp, int directDl, int directUp)
+{
+    if (speedChartWidget) {
+        QMap<SpeedWidget::GraphType, long> pointData;
+        pointData[SpeedWidget::OUTBOUND_PROXY_UP] = proxyUp;
+        pointData[SpeedWidget::OUTBOUND_PROXY_DOWN] = proxyDl;
+        pointData[SpeedWidget::OUTBOUND_DIRECT_UP] = directUp;
+        pointData[SpeedWidget::OUTBOUND_DIRECT_DOWN] = directDl;
+
+        speedChartWidget->AddPointData(pointData);
+    }
+}
+
+void MainWindow::refresh_proxy_list_column_size() {
+    const auto group = Configs::dataManager->groupsRepo->CurrentGroup();
+    if (!group || !ui->profilesTableView->isVisible()) return;
+
+    auto *hHeader = dynamic_cast<ProfilesTableFilterHeader*>(ui->profilesTableView->horizontalHeader());
+    QTimer::singleShot(0, ui->profilesTableView, [=, this]() {
+        // Stop the resizeSection / scrollbar-policy changes below from re-entering
+        // this routine via the vertical scrollbar's valueChanged signal.
+        if (m_adjustingColumns) return;
+        m_adjustingColumns = true;
+        QScrollBar *vBar = ui->profilesTableView->verticalScrollBar();
+        const bool vBarBlocked = vBar->blockSignals(true);
+        hHeader->blockSignals(true);
+        constexpr int columnCount = ProfilesTableModel::ColumnCount;
+        // Widths saved before the column set last changed no longer line up with
+        // the header, so fall back to auto-sizing instead of indexing past the end.
+        if (!group->column_width.isEmpty() && group->column_width.size() != columnCount) {
+            group->column_width.clear();
+        }
+        if (group->column_width.isEmpty()) {
+            hHeader->setSectionResizeMode(ProfilesTableModel::ColType, QHeaderView::ResizeToContents);
+            hHeader->setSectionResizeMode(ProfilesTableModel::ColAddress, QHeaderView::Stretch);
+            hHeader->setSectionResizeMode(ProfilesTableModel::ColName, QHeaderView::Stretch);
+            hHeader->setSectionResizeMode(ProfilesTableModel::ColTestResult, QHeaderView::ResizeToContents);
+            hHeader->setSectionResizeMode(ProfilesTableModel::ColTraffic, QHeaderView::ResizeToContents);
+            // ResizeToContents only measures on-screen rows, so pin these columns to the
+            // widest seen for this group or they jitter while scrolling.
+            for (int col : {ProfilesTableModel::ColType,
+                            ProfilesTableModel::ColTestResult, ProfilesTableModel::ColTraffic}) {
+                if (group->calculated_column_width.size() > col &&
+                    group->calculated_column_width[col] > hHeader->sectionSize(col)) {
+                    hHeader->setSectionResizeMode(col, QHeaderView::Fixed);
+                    hHeader->resizeSection(col, group->calculated_column_width[col]);
+                }
+            }
+            ui->profilesTableView->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+            group->clearCalculatedColumnWidth();
+            for (int i = 0; i < columnCount; i++) {
+                auto size = hHeader->sectionSize(i);
+                hHeader->setSectionResizeMode(i, QHeaderView::Interactive);
+                hHeader->resizeSection(i, size);
+                group->calculated_column_width << size;
+            }
+        } else {
+            group->clearCalculatedColumnWidth();
+            for (int i = 0; i < columnCount; i++) {
+                hHeader->setSectionResizeMode(i, QHeaderView::Interactive);
+                hHeader->resizeSection(i, group->column_width.at(i));
+            }
+            ui->profilesTableView->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        }
+        hHeader->adjustPositions();
+        hHeader->blockSignals(false);
+        vBar->blockSignals(vBarBlocked);
+        m_adjustingColumns = false;
+    });
+}
+
+void MainWindow::refresh_proxy_list(const QList<int>& ids, bool mayNeedReset, RefreshAnchor anchor) {
+    if (!Configs::dataManager->settingsRepo->refreshing_group) saveProfileFocusState();
+    refresh_proxy_list_impl(ids, mayNeedReset);
+    if (mayNeedReset) restoreProfileFocusState(anchor);
+}
+
+void MainWindow::refresh_proxy_list_impl(const QList<int>& ids, bool mayNeedReset) {
+    const auto currentGroup = Configs::dataManager->groupsRepo->CurrentGroup();
+    if (currentGroup == nullptr)
+    {
+        MW_show_log("Could not find current group!");
+        return;
+    }
+    // refresh data
+    refresh_proxy_list_impl_refresh_data(ids, mayNeedReset);
+    // now refresh column sizes
+    refresh_proxy_list_column_size();
+}
+
+void MainWindow::refresh_proxy_list_impl_refresh_data(const QList<int>& ids, bool mayNeedReset) {
+    const auto currentGroup = Configs::dataManager->groupsRepo->CurrentGroup();
+    if (currentGroup == nullptr) return;
+    // The model holds the group in full; the proxy decides what is on screen.
+    if (!ids.isEmpty()) {
+        for (auto id:ids) profilesTableModel->refreshProfileId(id);
+    } else {
+        profilesTableModel->refreshTable(currentGroup->profiles, mayNeedReset);
+    }
+}
+
+// Owns no test session, so unlike the group sweeps it stays out of TestRunner.
+void MainWindow::url_test_current() {
+    last_test_time = QDateTime::currentSecsSinceEpoch();
+    ui->label_running->setText(tr("Testing"));
+
+    runOnNewThread([=,this] {
+        libcore::TestReq req;
+        req.test_current = true;
+        req.url = Configs::dataManager->settingsRepo->test_latency_url.toStdString();
+
+        bool rpcOK;
+        auto result = API::defaultClient->Test(&rpcOK, req);
+        if (!rpcOK || result.results.empty()) return;
+
+        auto latency = result.results[0].latency_ms.value();
+        last_test_time = QDateTime::currentSecsSinceEpoch();
+
+        runOnUiThread([=,this] {
+            if (!result.results[0].error.value().empty()) {
+                MW_show_log(QString("UrlTest error: %1").arg(QString::fromStdString(result.results[0].error.value())));
+            }
+            if (latency <= 0) {
+                ui->label_running->setText(tr("Test Result") + ": " + tr("Unavailable"));
+            } else if (latency > 0) {
+                ui->label_running->setText(tr("Test Result") + ": " + QString("%1 ms").arg(latency));
+            }
+        });
+    });
+}

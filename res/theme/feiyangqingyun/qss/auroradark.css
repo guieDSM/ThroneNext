@@ -1,0 +1,279 @@
+/* Aurora Dark: restrained desktop chrome with a clear blue connection accent. */
+QWidget {
+    color: #E7EEF7;
+    background-color: #0B1017;
+    selection-background-color: #2F7FD3;
+    selection-color: #FFFFFF;
+    outline: 0;
+}
+
+QMainWindow, QDialog, QMessageBox, QWizard, QDockWidget {
+    background-color: #0B1017;
+}
+
+QToolTip {
+    color: #F4F8FC;
+    background-color: #182536;
+    border: 1px solid #31445E;
+    border-radius: 5px;
+    padding: 5px 7px;
+}
+
+QFrame[frameShape="4"], QFrame[frameShape="5"] {
+    color: #223043;
+}
+
+QGroupBox {
+    background-color: #0F1722;
+    border: 1px solid #223043;
+    border-radius: 9px;
+    margin-top: 14px;
+    padding: 10px 8px 8px 8px;
+    font-weight: 600;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 10px;
+    padding: 0 5px;
+    color: #CAD7E7;
+    background-color: #0F1722;
+}
+
+QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox,
+QDateEdit, QTimeEdit, QDateTimeEdit, QComboBox {
+    color: #E7EEF7;
+    background-color: #0E1621;
+    border: 1px solid #293A50;
+    border-radius: 7px;
+    padding: 5px 8px;
+    min-height: 20px;
+}
+
+QLineEdit:hover, QTextEdit:hover, QPlainTextEdit:hover, QSpinBox:hover,
+QDoubleSpinBox:hover, QDateEdit:hover, QTimeEdit:hover,
+QDateTimeEdit:hover, QComboBox:hover {
+    border-color: #3B5573;
+}
+
+QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QSpinBox:focus,
+QDoubleSpinBox:focus, QDateEdit:focus, QTimeEdit:focus,
+QDateTimeEdit:focus, QComboBox:focus {
+    border-color: #52A8FF;
+    background-color: #101B28;
+}
+
+QLineEdit:read-only, QTextEdit:read-only, QPlainTextEdit:read-only {
+    color: #A6B4C6;
+    background-color: #101722;
+}
+
+QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled,
+QSpinBox:disabled, QDoubleSpinBox:disabled, QComboBox:disabled {
+    color: #536277;
+    background-color: #0C121A;
+    border-color: #1B2736;
+}
+
+QComboBox::drop-down {
+    width: 24px;
+    border: 0;
+    background: transparent;
+}
+
+QComboBox QAbstractItemView {
+    background-color: #111B28;
+    border: 1px solid #2C4058;
+    border-radius: 6px;
+    padding: 4px;
+    selection-background-color: #254F7B;
+}
+
+QPushButton, QToolButton, StartStopButton {
+    color: #E7EEF7;
+    background-color: #172333;
+    border: 1px solid #2A3B51;
+    border-radius: 7px;
+    padding: 5px 11px;
+    min-height: 20px;
+}
+
+QPushButton:hover, QToolButton:hover, StartStopButton:hover {
+    background-color: #1D2E43;
+    border-color: #3D5B7E;
+}
+
+QPushButton:pressed, QToolButton:pressed, StartStopButton:pressed,
+QPushButton:checked, QToolButton:checked {
+    background-color: #214E7B;
+    border-color: #4AA5FF;
+}
+
+QPushButton:focus, QToolButton:focus {
+    border-color: #52A8FF;
+}
+
+QPushButton:disabled, QToolButton:disabled {
+    color: #536277;
+    background-color: #101722;
+    border-color: #1E2A3A;
+}
+
+QToolButton::menu-indicator {
+    image: none;
+}
+
+QMenuBar {
+    background-color: #0D141D;
+    border-bottom: 1px solid #1E2B3B;
+    spacing: 3px;
+}
+
+QMenuBar::item {
+    background: transparent;
+    border-radius: 5px;
+    padding: 5px 9px;
+}
+
+QMenuBar::item:selected, QMenuBar::item:pressed {
+    background-color: #19283A;
+}
+
+QMenu {
+    color: #E7EEF7;
+    background-color: #111A26;
+    border: 1px solid #2B3D54;
+    border-radius: 7px;
+    padding: 5px;
+}
+
+QMenu::item {
+    border-radius: 5px;
+    padding: 6px 24px 6px 10px;
+}
+
+QMenu::item:selected {
+    background-color: #214E7B;
+}
+
+QMenu::separator {
+    height: 1px;
+    background-color: #26364A;
+    margin: 5px 7px;
+}
+
+QTabWidget::pane {
+    background-color: #0F1722;
+    border: 1px solid #223043;
+    border-radius: 8px;
+    top: -1px;
+}
+
+QTabBar::tab {
+    color: #92A3B8;
+    background-color: transparent;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    padding: 7px 12px;
+    margin-right: 2px;
+}
+
+QTabBar::tab:hover {
+    color: #DCE7F4;
+    background-color: #121D2A;
+    border-radius: 6px 6px 0 0;
+}
+
+QTabBar::tab:selected {
+    color: #FFFFFF;
+    border-bottom-color: #52A8FF;
+}
+
+QTableView, QTreeView, QListView, QAbstractItemView {
+    color: #DCE6F2;
+    background-color: #0E1621;
+    alternate-background-color: #111C29;
+    border: 1px solid #223043;
+    border-radius: 7px;
+    gridline-color: #1F2C3C;
+}
+
+QTableView::item, QTreeView::item, QListView::item {
+    padding: 3px 5px;
+    border: 0;
+}
+
+QTableView::item:hover, QTreeView::item:hover, QListView::item:hover {
+    background-color: #17283A;
+}
+
+QTableView::item:selected, QTreeView::item:selected, QListView::item:selected {
+    color: #FFFFFF;
+    background-color: #245986;
+}
+
+QHeaderView::section {
+    color: #AFC0D3;
+    background-color: #111B28;
+    border: 0;
+    border-right: 1px solid #223043;
+    border-bottom: 1px solid #293A50;
+    padding: 6px 8px;
+    font-weight: 600;
+}
+
+QScrollBar:vertical, QScrollBar:horizontal {
+    background: #0B1119;
+    border: 0;
+    margin: 2px;
+}
+
+QScrollBar:vertical { width: 10px; }
+QScrollBar:horizontal { height: 10px; }
+
+QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
+    background: #34465D;
+    border-radius: 4px;
+    min-height: 26px;
+    min-width: 26px;
+}
+
+QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {
+    background: #496584;
+}
+
+QScrollBar::add-line, QScrollBar::sub-line,
+QScrollBar::add-page, QScrollBar::sub-page {
+    width: 0;
+    height: 0;
+    background: transparent;
+}
+
+QProgressBar {
+    color: #E7EEF7;
+    background-color: #111B28;
+    border: 1px solid #27394F;
+    border-radius: 6px;
+    text-align: center;
+    min-height: 13px;
+}
+
+QProgressBar::chunk {
+    background-color: #2F8DE5;
+    border-radius: 5px;
+}
+
+QStatusBar {
+    color: #93A4B8;
+    background-color: #0D141D;
+    border-top: 1px solid #1E2B3B;
+}
+
+QSplitter::handle {
+    background-color: #1B2838;
+}
+
+QSplitter::handle:hover {
+    background-color: #31516F;
+}

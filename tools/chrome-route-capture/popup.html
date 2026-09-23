@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Throne — проверка вкладки</title>
+  <style>
+    :root { color-scheme: dark; font-family: "Segoe UI", Arial, sans-serif; }
+    * { box-sizing: border-box; }
+    body { width: 382px; max-height: 590px; overflow-y: auto; margin: 0; background: #101821; color: #eef4f9; font-size: 13px; }
+    main { padding: 13px; }
+    header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+    .mark { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; background: #1e5f92; color: #fff; font-size: 18px; font-weight: 700; }
+    h1 { margin: 0; font-size: 17px; line-height: 1.2; font-weight: 650; }
+    .intro { margin: 0 0 13px; color: #c1d0dd; line-height: 1.45; }
+    .actions { display: flex; gap: 7px; margin-bottom: 11px; }
+    button { min-height: 34px; border: 1px solid #4c8ebd; border-radius: 6px; padding: 7px 10px; background: #236594; color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+    button:hover:not(:disabled) { background: #2d78ab; }
+    button:focus-visible, input:focus-visible { outline: 2px solid #9ed7ff; outline-offset: 2px; }
+    button:disabled { opacity: .5; cursor: default; }
+    #start { flex: 1; }
+    #stop { flex: 1.2; background: #204156; border-color: #45647a; }
+    #stop:hover:not(:disabled) { background: #2d5369; }
+    #status { min-height: 18px; margin: 0 0 12px; color: #c5d5e1; line-height: 1.4; }
+    #status.error { color: #ffb8a9; }
+    .panel { padding: 11px; margin-top: 9px; border: 1px solid #2d4151; border-radius: 8px; background: #14212d; }
+    .panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+    h2 { margin: 0; font-size: 13px; font-weight: 650; }
+    .count { color: #aec5d6; font-size: 12px; white-space: nowrap; }
+    input { width: 100%; min-height: 31px; padding: 6px 8px; border: 1px solid #3d5a70; border-radius: 5px; background: #0d1822; color: #eef4f9; font: inherit; }
+    input::placeholder { color: #a8bdce; }
+    .list { max-height: 146px; overflow-y: auto; margin-top: 7px; scrollbar-color: #45657a transparent; }
+    #events { max-height: 96px; }
+    .row { padding: 7px 2px; border-top: 1px solid #293b49; }
+    .row:first-child { border-top: 0; }
+    .row-top { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
+    .host { min-width: 0; overflow-wrap: anywhere; font-family: ui-monospace, Consolas, monospace; font-size: 12px; color: #eaf4fb; }
+    .meta { margin-top: 3px; color: #adc1d0; font-size: 11px; line-height: 1.3; }
+    .issue { color: #ffbf96; }
+    .empty { padding: 12px 2px; color: #b9cbd9; line-height: 1.4; }
+    .overflow { color: #c6d6e2; font-size: 11px; padding: 5px 2px 0; }
+    #payload-meta { margin: 0 0 5px; color: #bed0dd; line-height: 1.4; }
+    #delivery { font-weight: 600; }
+    #delivery.sent { color: #9ce4bb; }
+    #delivery.unsent { color: #ffc5a8; }
+    #send { width: 100%; margin-top: 8px; background: #214556; border-color: #466778; }
+    footer { margin-top: 12px; color: #b7c8d5; font-size: 11px; line-height: 1.4; }
+  </style>
+</head>
+<body>
+<main>
+  <header><span class="mark" aria-hidden="true">T</span><h1>Проверка вкладки</h1></header>
+  <p class="intro">Откройте в Throne «Добавить исключение» и введите адрес страницы. Закройте DevTools перед захватом.</p>
+  <div class="actions">
+    <button id="start" type="button">Начать захват</button>
+    <button id="stop" type="button">Завершить и передать</button>
+  </div>
+  <p id="status" role="status" aria-live="polite"></p>
+
+  <section class="panel" aria-labelledby="hosts-title">
+    <div class="panel-head"><h2 id="hosts-title">Куда обращалась вкладка</h2><span class="count" id="host-count">0 доменов</span></div>
+    <input id="filter" type="search" placeholder="Найти домен" aria-label="Найти домен в захвате">
+    <div id="hosts" class="list"><div class="empty">Запустите захват, чтобы увидеть домены этой вкладки.</div></div>
+    <div id="host-overflow" class="overflow" hidden></div>
+  </section>
+
+  <section class="panel" aria-labelledby="send-title">
+    <div class="panel-head"><h2 id="send-title">Что передаётся в Throne</h2><span id="delivery" class="count">Нет захвата</span></div>
+    <p id="payload-meta">Домен сайта, домены ошибок и число блокировок браузером.</p>
+    <div id="events" class="list"><div class="empty">Пока нечего передавать.</div></div>
+    <button id="send" type="button" hidden>Повторить передачу</button>
+  </section>
+
+  <footer>Полные ссылки и параметры запросов не сохраняются. В Throne передаются домен сайта, домены ошибок и число блокировок браузером; общий список доменов остаётся в расширении.</footer>
+</main>
+<script src="popup.js"></script>
+</body>
+</html>

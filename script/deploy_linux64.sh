@@ -1,0 +1,60 @@
+#!/bin/bash
+set -e
+
+rm -rf $DEST
+mkdir -p $DEST
+
+#### copy binary ####
+cp $GITHUB_WORKSPACE/build/Throne $DEST
+
+#### copy Throne.png ####
+cp $GITHUB_WORKSPACE/res/public/Throne.png $DEST
+
+source "$(dirname "$0")/extract_core_artifact.sh"
+
+sudo add-apt-repository universe
+sudo apt install libfuse2
+sudo apt install patchelf
+wget https://github.com/linuxdeploy/linuxdeploy/releases/latest/download/linuxdeploy-$ARCH.AppImage
+wget https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/latest/download/linuxdeploy-plugin-qt-$ARCH.AppImage
+chmod +x linuxdeploy-$ARCH.AppImage linuxdeploy-plugin-qt-$ARCH.AppImage
+
+export EXTRA_QT_PLUGINS="iconengines;wayland-shell-integration;wayland-decoration-client;"
+export EXTRA_PLATFORM_PLUGINS="libqwayland.so;"
+./linuxdeploy-$ARCH.AppImage --appdir $DEST --executable $DEST/Throne --plugin qt
+rm linuxdeploy-$ARCH.AppImage linuxdeploy-plugin-qt-$ARCH.AppImage
+cd $DEST
+rm -r ./usr/translations ./usr/bin ./usr/share ./apprun-hooks
+
+# fix plugins rpath
+rm -r ./usr/plugins
+mkdir ./usr/plugins
+mkdir ./usr/plugins/platforms
+cp $QT_PLUGIN_PATH/platforms/libqxcb.so ./usr/plugins/platforms
+cp $QT_PLUGIN_PATH/platforms/libqwayland.so ./usr/plugins/platforms
+cp -r $QT_PLUGIN_PATH/platformthemes ./usr/plugins
+cp -r $QT_PLUGIN_PATH/imageformats ./usr/plugins
+cp -r $QT_PLUGIN_PATH/iconengines ./usr/plugins
+cp -r $QT_PLUGIN_PATH/wayland-shell-integration ./usr/plugins
+cp -r $QT_PLUGIN_PATH/wayland-decoration-client ./usr/plugins
+cp -r $QT_PLUGIN_PATH/tls ./usr/plugins
+patchelf --set-rpath '$ORIGIN/../../lib' ./usr/plugins/platforms/libqxcb.so
+patchelf --set-rpath '$ORIGIN/../../lib' ./usr/plugins/platforms/libqwayland.so
+patchelf --set-rpath '$ORIGIN/../../lib' ./usr/plugins/platformthemes/libqgtk3.so
+patchelf --set-rpath '$ORIGIN/../../lib' ./usr/plugins/platformthemes/libqxdgdesktopportal.so
+
+# fix extra libs...
+mkdir ./usr/lib2
+ls ./usr/lib/
+cp ./usr/lib/libQt* ./usr/lib/libxcb-cursor* ./usr/lib/libxcb-util* ./usr/lib/libicuuc* ./usr/lib/libicui18n* ./usr/lib/libicudata* ./usr/lib2
+rm -r ./usr/lib
+mv ./usr/lib2 ./usr/lib
+
+# fix lib rpath
+cd $DEST
+patchelf --set-rpath '$ORIGIN/usr/lib' ./Throne
+
+# handle debug info
+objcopy --only-keep-debug $DEST/Throne $DEST/Throne.debug
+strip --strip-debug --strip-unneeded $DEST/Throne
+objcopy --add-gnu-debuglink=$DEST/Throne.debug $DEST/Throne

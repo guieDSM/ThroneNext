@@ -1,0 +1,1307 @@
+#include "include/ui/mainwindow.h"
+
+#include "include/ui/mainWindow/MainWindowInternal.h"
+// Full definition: MainWindow's destructor lives here and destroys the unique_ptr.
+#include "include/ui/mainWindow/TestRunner.h"
+
+#include <QMenu>
+
+#include "include/configs/sub/GroupUpdater.hpp"
+#include "include/configs/sub/RouteUpdater.hpp"
+#include "include/global/PeriodicRunner.hpp"
+#include "include/global/Logger.hpp"
+#include "include/stats/autoselector/AutoSelectorMonitor.hpp"
+#include "include/ui/stats/dialog_auto_selector.h"
+#include "include/sys/Process.hpp"
+#include "include/sys/AutoRun.hpp"
+#include "include/sys/UrlScheme.hpp"
+
+#include "include/ui/setting/ThemeManager.hpp"
+#include "include/ui/setting/QuickRouteDialog.h"
+#include "include/database/entities/QuickRoutePolicy.hpp"
+#include "include/ui/setting/Icon.hpp"
+#include "include/ui/stats/dialog_traffic_stats.h"
+#include "include/ui/stats/dialog_runtime_stats.h"
+#include "include/ui/widget/StartStopButton.hpp"
+
+#include "include/configs/generate.h"
+#include "include/api/RPC.h"
+#include "include/database/GroupsRepo.h"
+#include "include/database/ProfilesRepo.h"
+#include "include/database/RoutesRepo.h"
+#include "include/global/Common.h"
+
+#include "include/ui/utils/ProfilesTableFilterHeader.h"
+#include "include/ui/utils/ProfilesTableModel.h"
+
+#include "3rdparty/qv2ray/v2/proxy/QvProxyConfigurator.hpp"
+
+#include "include/ui/group/dialog_edit_group.h"
+
+#ifdef Q_OS_WIN
+#include <windows.h>
+// <windows.h> pulls in winspool.h's `#define SetPort SetPortW`, which under unity
+// builds clobbers Configs::outbound::SetPort in sibling files. Drop it.
+#undef SetPort
+#else
+#ifdef Q_OS_LINUX
+#include <QDBusInterface>
+#include <QDBusReply>
+#include <sys/socket.h>
+#endif
+#ifdef Q_OS_MACOS
+#include <sys/socket.h>
+#include <sys/un.h>
+#endif
+#include <unistd.h>
+#endif
+
+#include <QUuid>
+
+#include <QClipboard>
+#include <QScrollBar>
+#include <QDesktopServices>
+#include <QTimer>
+#include <QMessageBox>
+#include <QDir>
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
+#include <QStyleHints>
+#endif
+#include <QFileDialog>
+#include <QToolButton>
+#include <QBoxLayout>
+#include <include/global/HTTPRequestHelper.hpp>
+#include "include/global/DeviceDetailsHelper.hpp"
+
+void UI_InitMainWindow() {
+    mainwindow = new MainWindow;
+}
+
+// Caller must hold coreProcessMutex (reads core_process lock-free by design).
+bool MainWindow::verify_core_pid(QLocalSocket *socket) {
+    if (!core_process) return false;
+    qint64 expectedPid = core_process->processId();
+    if (expectedPid <= 0) return false;
+
+#if defined(Q_OS_LINUX)
+    struct ucred cred = {};
+    socklen_t credLen = sizeof(cred);
+    if (getsockopt(static_cast<int>(socket->socketDescriptor()), SOL_SOCKET, SO_PEERCRED, &cred, &credLen) == 0) {
+        return static_cast<qint64>(cred.pid) == expectedPid;
+    }
+    return false;
+#elif defined(Q_OS_MACOS)
+    pid_t pid = 0;
+    socklen_t pidLen = sizeof(pid);
+    if (getsockopt(static_cast<int>(socket->socketDescriptor()), SOL_LOCAL, LOCAL_PEERPID, &pid, &pidLen) == 0) {
+        return static_cast<qint64>(pid) == expectedPid;
+    }
+    return false;
+#elif defined(Q_OS_WIN)
+    ULONG pid = 0;
+    HANDLE hPipe = reinterpret_cast<HANDLE>(static_cast<qintptr>(socket->socketDescriptor()));
+    if (GetNamedPipeClientProcessId(hPipe, &pid)) {
+        return static_cast<qint64>(pid) == expectedPid;
+    }
+    return false;
+#else
+    Q_UNUSED(socket)
+    return true;
+#endif
+}
+
+// Maps a theme name to the log viewer's syntax-highlight mode (true = dark, false = light).
+// Stylesheet themes have a known brightness; plain QStyle themes follow the OS preference.
+static bool themeUsesDarkLog(const QString &theme) {
+    const auto lower = theme.toLower();
+    if (lower.contains("vista") || lower.contains("flatgray") || lower.contains("lightblue") || lower.contains("softpink")) {
+        return false; // light themes
+    }
+    if (lower.contains("auroradark") || lower.contains("qdarkstyle") || lower.contains("blacksoft")) {
+        return true; // dark themes
+    }
+    return isDarkMode(); // bi-mode themes, follow system preference
+}
+
+MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWindow) {
+    mainwindow = this;
+    const bool safeCanary =
+        Configs::dataManager->settingsRepo->flag_safe_canary;
+    // A process crash cannot run prepare_exit(). Restore only Windows proxy
+    // fields that are still owned by the previous Throne process before a new
+    // core/profile can be started.
+    if (!safeCanary) {
+        const auto hadProxyJournal = HasSystemProxyRecoveryJournal();
+        const auto proxyRecovered = RecoverSystemProxy();
+        if (!proxyRecovered) {
+            LOG_ERROR("Unresolved system proxy ownership state; live proxy mutation remains fail-closed.");
+        } else if (!hadProxyJournal
+                   && Configs::dataManager->settingsRepo->remember_system_proxy
+                   && !RecoverLegacySystemProxy(Configs::dataManager->settingsRepo->inbound_socks_port,
+                                                 Configs::dataManager->settingsRepo->proxy_scheme)) {
+            LOG_ERROR("Legacy system proxy recovery was incomplete.");
+        }
+    } else {
+        LOG_WARN("Safe canary mode: system proxy recovery and mutation are disabled.");
+    }
+    setAcceptDrops(true);
+    MW_dialog_message = [=,this](MwMessage cmd, QStringList args) {
+        runOnUiThread([=,this]
+        {
+            dialog_message_impl(cmd, args);
+        });
+    };
+    MW_handle_deeplink = [=,this](const QString &url) {
+        runOnUiThread([=,this]
+        {
+            handle_deeplink_impl(url);
+        });
+    };
+    MW_import_files = [=,this](const QStringList &paths) {
+        runOnUiThread([=,this]
+        {
+            importFromFiles(paths);
+        });
+    };
+
+    // handle AutoRun migration and stale task settings
+    if (!safeCanary) {
+        AutoRun_FixTaskIfNeeded();
+        AutoRun_MigrateIfNeeded();
+    }
+
+    // register the throne:// URL scheme and the config file handler (self-heals if
+    // the install was moved)
+    if (!safeCanary) UrlScheme_RegisterIfNeeded();
+
+    // Setup misc UI
+    // migrate old themes
+    bool isNum;
+    Configs::dataManager->settingsRepo->theme.toInt(&isNum);
+    if (isNum) {
+        Configs::dataManager->settingsRepo->theme = "System";
+    }
+    themeManager->ApplyTheme(Configs::dataManager->settingsRepo->theme);
+    ui->setupUi(this);
+
+    // init shortcuts
+    setActionsData();
+    if (!safeCanary) loadShortcuts();
+
+    last_running_profile_id = Configs::dataManager->settingsRepo->remember_id;
+
+    // geometry remembering
+    if (!Configs::dataManager->settingsRepo->mainWindowGeometry.isEmpty()) {
+        auto geo = DecodeB64IfValid(Configs::dataManager->settingsRepo->mainWindowGeometry);
+        this->restoreGeometry(geo);
+    }
+
+    // setup log
+    ui->splitter->restoreState(DecodeB64IfValid(Configs::dataManager->settingsRepo->splitter_state));
+    setLogHighlighter(themeUsesDarkLog(Configs::dataManager->settingsRepo->theme));
+    qvLogDocument->setUndoRedoEnabled(false);
+    qvLogDocument->setMaximumBlockCount(Configs::dataManager->settingsRepo->max_log_line);
+    ui->masterLogBrowser->setUndoRedoEnabled(false);
+    ui->masterLogBrowser->setDocument(qvLogDocument);
+    applyLogBrowserFont();
+    updateLogFilterFields();
+    runOnThread([=, this] {
+        log_process_loop();
+    }, LogThread);
+
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
+    connect(qApp->styleHints(), &QStyleHints::colorSchemeChanged, this, [=,this](const Qt::ColorScheme& scheme) {
+        setLogHighlighter(scheme == Qt::ColorScheme::Dark);
+        themeManager->ApplyTheme(Configs::dataManager->settingsRepo->theme, true);
+    });
+#endif
+    connect(themeManager, &ThemeManager::themeChanged, this, [=,this](const QString& theme){
+        setLogHighlighter(themeUsesDarkLog(theme));
+        scheduleProxyListRefresh();
+    });
+    MW_show_log = [=,this](const QString &log) {
+        if (Logging::WriteUserLog(log)) append_log(log);
+    };
+
+    // Listen port if random
+    if (Configs::dataManager->settingsRepo->random_inbound_port)
+    {
+        Configs::dataManager->settingsRepo->inbound_socks_port = MkPort(Configs::dataManager->settingsRepo->inbound_address);
+    }
+
+    //init HWID data
+    if (!safeCanary) runOnNewThread([=, this] {GetDeviceDetails(); });
+
+    // Prepare core
+    auto core_path = QApplication::applicationDirPath() + "/";
+    core_path += "ThroneCore";
+
+    bool coreDebugMode = (Configs::dataManager->settingsRepo->log_level == "debug");
+
+    // Create IPC server with a random UUID name
+    Configs::dataManager->settingsRepo->core_socket_name =
+        "throneIPC-" + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    core_server = new QLocalServer(this);
+    core_server->setSocketOptions(QLocalServer::UserAccessOption);
+    if (!core_server->listen(Configs::dataManager->settingsRepo->core_socket_name)) {
+        qWarning() << "Failed to start IPC server:" << core_server->errorString();
+        qApp->quit();
+    }
+
+    connect(core_server, &QLocalServer::newConnection, this, [=, this]() {
+        auto socket = core_server->nextPendingConnection();
+        int profileId = -1;
+        {
+            // Hold coreProcessMutex so we never observe a half-published
+            // core_process while DS_cores is still constructing/starting it.
+            QMutexLocker lock(&coreProcessMutex);
+            if (!verify_core_pid(socket)) {
+                MW_show_log("[Warn] IPC connection from unexpected process rejected");
+                socket->close();
+                socket->deleteLater();
+                return;
+            }
+            if (core_process) {
+                profileId = core_process->start_profile_when_core_is_up.exchange(-1);
+            }
+        }
+        setup_rpc(socket);
+        Configs::dataManager->settingsRepo->core_running = true;
+        LOG_INFO(QString("elevated: %1").arg(Configs::IsAdmin() ? "yes" : "no"));
+        MW_dialog_message(MwMessage::CoreStarted, {Int2String(profileId)});
+    });
+
+    // Start core
+    auto socketFullName = core_server->fullServerName();
+    if (!safeCanary) {
+        runOnThread(
+            [=, this] {
+                QMutexLocker lock(&coreProcessMutex);
+                core_process = new Configs_sys::CoreProcess(core_path, socketFullName, coreDebugMode);
+                if (Configs::dataManager->settingsRepo->remember_enable &&
+                    Configs::dataManager->settingsRepo->remember_id >= 0) {
+                    core_process->start_profile_when_core_is_up =
+                        Configs::dataManager->settingsRepo->remember_id;
+                }
+                core_process->Start();
+            },
+            DS_cores);
+    }
+
+    if (!Configs::dataManager->settingsRepo->font.isEmpty()) {
+        auto font = qApp->font();
+        font.setFamily(Configs::dataManager->settingsRepo->font);
+        qApp->setFont(font);
+    }
+    if (Configs::dataManager->settingsRepo->font_size != 0) {
+        auto font = qApp->font();
+        font.setPointSize(Configs::dataManager->settingsRepo->font_size);
+        qApp->setFont(font);
+    }
+
+    parallelCoreCallPool->setMaxThreadCount(10); // constant value
+    testRunner = std::make_unique<TestRunner>(this);
+    //
+    // The .ui carries Return; numpad Enter is the same gesture.
+    ui->menu_start->setShortcuts({QKeySequence(Qt::Key_Return), QKeySequence(Qt::Key_Enter)});
+    connect(ui->menu_start, &QAction::triggered, this, [=,this]() { profile_start(); });
+    connect(ui->menu_stop, &QAction::triggered, this, [=,this]() { profile_stop(false, false, true); });
+    connect(ui->toolButton_startstop, &QAbstractButton::clicked, this, [=,this]() {
+        // When another row is selected the main button means Switch, not Stop.
+        // The previous behaviour silently disconnected the active profile.
+        const auto selected = get_now_selected_list();
+        if (running != nullptr && selected.size() == 1 && selected.first() != running->id) {
+            profile_start(selected.first());
+        } else if (running != nullptr) {
+            profile_stop(false, false, true);
+        } else {
+            profile_start();
+        }
+    });
+    connect(ui->tabWidget->tabBar(), &QTabBar::tabMoved, this, [=,this](int from, int to) {
+        // use tabData to track tab & gid
+        QList<int> tabOrder;
+        for (int i = 0; i < ui->tabWidget->tabBar()->count(); i++) {
+            tabOrder += ui->tabWidget->tabBar()->tabData(i).toInt();
+        }
+        Configs::dataManager->groupsRepo->SetGroupsTabOrder(tabOrder);
+        on_tabWidget_currentChanged(ui->tabWidget->tabBar()->currentIndex());
+    });
+    ui->label_running->installEventFilter(this);
+    ui->label_inbound->installEventFilter(this);
+    ui->splitter->installEventFilter(this);
+    ui->tabWidget->installEventFilter(this);
+    //
+    auto btnFilter = new QToolButton(this);
+    btnFilter->setIcon(QIcon(":/icon/filter.png"));
+    btnFilter->setToolTip(QString("%1\n%2").arg(tr("Enable Filter"), QKeySequence(QKeySequence::Find).toString(QKeySequence::NativeText)));
+    btnFilter->setShortcut(QKeySequence::Find);
+    btnFilter->setCheckable(true);
+    connect(btnFilter, &QToolButton::toggled, static_cast<ProfilesTableFilterHeader*>(ui->profilesTableView->horizontalHeader()), &ProfilesTableFilterHeader::setFiltersVisible);
+    connect(static_cast<ProfilesTableFilterHeader*>(ui->profilesTableView->horizontalHeader()), &ProfilesTableFilterHeader::closeRequested,
+            btnFilter, [btnFilter] { btnFilter->setChecked(false); });
+    ui->tabWidget->setCornerWidget(btnFilter, Qt::TopRightCorner);
+    //
+    if (!safeCanary) RegisterHotkey(false);
+    //
+    auto last_size = Configs::dataManager->settingsRepo->mw_size.split("x");
+    if (last_size.length() == 2) {
+        auto w = last_size[0].toInt();
+        auto h = last_size[1].toInt();
+        if (w > 0 && h > 0) {
+            resize(w, h);
+        }
+    }
+
+    // software_name
+    software_name = "Throne";
+    software_core_name = "sing-box";
+    //
+    if (auto dashDir = QDir("dashboard"); !dashDir.exists() && QDir().mkdir("dashboard")) {
+        if (auto dashFile = QFile(":/Throne/dashboard-notice.html"); dashFile.exists() && dashFile.open(QIODevice::ReadOnly))
+        {
+            auto data = dashFile.readAll();
+            if (auto dest = QFile("dashboard/index.html"); dest.open(QIODevice::Truncate | QIODevice::WriteOnly))
+            {
+                dest.write(data);
+                dest.close();
+            }
+            dashFile.close();
+        }
+    }
+    if (auto iconsDir = QDir("icons"); !iconsDir.exists()) {
+        QDir().mkdir("icons") ? qDebug("created icons dir") : qDebug("Failed to create icons dir");
+    }
+
+    // top bar
+    ui->toolButton_program->setMenu(ui->menu_program);
+    ui->toolButton_preferences->setMenu(ui->menu_preferences);
+    ui->toolButton_routing->setMenu(ui->menuRouting_Menu);
+    ui->toolButton_testing->setMenu(ui->menuTesting);
+    ui->toolButton_tools->setMenu(ui->menuTools);
+    // Open the exception editor directly; its tabs choose the target type.
+    if (auto* bar = ui->horizontalLayout_2) {
+          const int toolsIndex = bar->indexOf(ui->toolButton_tools);
+          if (toolsIndex < 0) qFatal("Tools button is missing from the top toolbar");
+          auto openQuickDialog = [this] {
+                QuickRouteDialog dialog(this, QuickRouteDialog::StartTab::Site,
+                    [this](const QJsonObject& record, QString* error) {
+                        const auto& settings = Configs::dataManager->settingsRepo;
+                        if (settings->started_id < 0) {
+                            if (error) *error = tr("Запустите VPN перед проверкой сайта.");
+                            return false;
+                        }
+                        const auto current = Configs::dataManager->routesRepo->GetRouteProfile(settings->current_route_id);
+                        if (!current) {
+                            if (error) *error = tr("Активный профиль маршрутизации не найден.");
+                            return false;
+                        }
+                        auto preview = std::make_shared<Configs::RouteProfile>(*current);
+                        if (!Configs::QuickRoute::insertRule(*preview, record, error)) return false;
+                        const auto profile = Configs::dataManager->profilesRepo->GetProfile(settings->started_id);
+                        if (!profile) {
+                            if (error) *error = tr("Рабочий профиль не найден");
+                            return false;
+                        }
+                        const auto built = Configs::BuildSingBoxConfig(profile, preview);
+                        if (!built->error.isEmpty()) {
+                            if (error) *error = built->error;
+                            return false;
+                        }
+                        bool rpcOK = false;
+                        const QString check = API::defaultClient->CheckConfig(&rpcOK,
+                            QJsonObject2QString(built->coreConfig, true));
+                        if (!rpcOK || !check.isEmpty()) {
+                            if (error) *error = check.isEmpty() ? tr("Ядро не смогло проверить конфигурацию") : check;
+                            return false;
+                          }
+                          quickRoutePreview_ = preview;
+                          quickRoutePreviewReady_ = false;
+                          quickRoutePreviewProfileId_ = settings->started_id;
+                          profile_start(settings->started_id);
+                          return true;
+                      },
+                      [this] { return quickRoutePreviewReady_; },
+                      [this] {
+                          const int id = quickRoutePreviewProfileId_;
+                          quickRoutePreview_.reset();
+                          quickRoutePreviewReady_ = false;
+                          quickRoutePreviewProfileId_ = -1;
+                          if (id < 0) return;
+                          // A user may close the dialog while the temporary
+                          // profile is still starting. Wait for that start to
+                          // finish before restoring the saved routing profile.
+                          auto* restore = new QTimer(this);
+                          restore->setInterval(250);
+                          connect(restore, &QTimer::timeout, this, [this, restore, id] {
+                              if (Configs::dataManager->settingsRepo->prepare_exit) {
+                                  restore->stop();
+                                  restore->deleteLater();
+                              } else if (mu_starting.available() > 0) {
+                                  restore->stop();
+                                  restore->deleteLater();
+                                  profile_start(id);
+                              }
+                          });
+                          restore->start();
+                      },
+                    [this](bool activeChanged) {
+                        if (!activeChanged) return;
+                        const int id = Configs::dataManager->settingsRepo->started_id;
+                        if (id < 0) return;
+                        if (QMessageBox::question(this, tr("Применить маршрутизацию"),
+                            tr("Перезапустить текущее подключение, чтобы применить исключение?")) == QMessageBox::Yes)
+                            profile_start(id);
+                    },
+                    [this](const std::shared_ptr<Configs::RouteProfile>& route, QString* error) {
+                        const int id = Configs::dataManager->settingsRepo->started_id;
+                        if (id < 0) return true; // Structural validation still runs in the editor.
+                        const auto profile = Configs::dataManager->profilesRepo->GetProfile(id);
+                        if (!profile) { if (error) *error = tr("Рабочий профиль не найден"); return false; }
+                        const auto built = Configs::BuildSingBoxConfig(profile, route);
+                        if (!built->error.isEmpty()) { if (error) *error = built->error; return false; }
+                        bool rpcOK = false;
+                        const QString check = API::defaultClient->CheckConfig(&rpcOK,
+                            QJsonObject2QString(built->coreConfig, true));
+                        if (!rpcOK || !check.isEmpty()) {
+                            if (error) *error = check.isEmpty() ? tr("Ядро не смогло проверить конфигурацию") : check;
+                            return false;
+                        }
+                        return true;
+                    },
+                    [this] {
+                        QTimer::singleShot(0, this, [this] { on_menu_routing_settings_triggered(); });
+                    });
+                dialog.exec();
+          };
+          quickRouteButton_ = new QToolButton(this);
+          quickRouteButton_->setObjectName(QStringLiteral("toolButton_quick_route"));
+          quickRouteButton_->setText(tr("Добавить\nисключение"));
+          quickRouteButton_->setToolTip(tr("Добавить исключение сайта, IP или приложения"));
+          quickRouteButton_->setIcon(QIcon(QStringLiteral(":/icon/filter.png")));
+          quickRouteButton_->setIconSize(QSize(18, 18));
+          quickRouteButton_->setStyleSheet(QStringLiteral("QToolButton { padding-top: 2px; padding-bottom: 2px; }"));
+          quickRouteButton_->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
+          connect(quickRouteButton_, &QToolButton::clicked, this, openQuickDialog);
+          bar->insertWidget(toolsIndex, quickRouteButton_);
+    }
+    connect(ui->toolButton_group_test, &QToolButton::clicked,
+            ui->actionUrl_Test_Group, &QAction::trigger);
+    ui->toolButton_program->installEventFilter(this);
+
+    designMinimumSize = minimumSize();
+    applyTopBarMetrics();
+
+    ui->menubar->setVisible(false);
+    connect(ui->actionRuntime_Stats, &QAction::triggered, this, [=, this]() {
+        USE_DIALOG(DialogRuntimeStats)
+    });
+    ui->actionTraffic_Stats->setVisible(!Configs::dataManager->settingsRepo->disable_traffic_aggregation);
+    connect(ui->actionTraffic_Stats, &QAction::triggered, this, [=, this]() {
+        USE_DIALOG(DialogTrafficStats)
+    });
+    // Only meaningful while a selector profile is running; refresh_auto_selector_view
+    // shows and hides it as the monitor starts and stops.
+    ui->actionAuto_Selector->setVisible(false);
+    connect(ui->actionAuto_Selector, &QAction::triggered, this, [=,this]() {
+        if (m_autoSelectorDialog == nullptr) {
+            m_autoSelectorDialog = new DialogAutoSelector(this);
+            connect(m_autoSelectorDialog, &QDialog::finished, this, [this] {
+                m_autoSelectorDialog->deleteLater();
+                m_autoSelectorDialog = nullptr;
+            });
+        }
+        m_autoSelectorDialog->refresh();
+        m_autoSelectorDialog->show();
+        m_autoSelectorDialog->raise();
+        m_autoSelectorDialog->activateWindow();
+    });
+    connect(ui->actionCheck_For_Update, &QAction::triggered, this, [=,this] { runOnNewThread([=,this] { CheckUpdate(); }); });
+    if (!QFile::exists(QApplication::applicationDirPath() + "/updater") && !QFile::exists(QApplication::applicationDirPath() + "/updater.exe"))
+    {
+        ui->actionCheck_For_Update->setDisabled(true);
+    }
+
+    // setup connection UI
+    setupConnectionList();
+    ui->stats_widget->tabBar()->setCurrentIndex(Configs::dataManager->settingsRepo->stats_tab);
+    connect(ui->stats_widget->tabBar(), &QTabBar::currentChanged, this, [=,this](int index)
+    {
+        Configs::dataManager->settingsRepo->stats_tab = ui->stats_widget->tabBar()->currentIndex();
+        syncConnectionViewState();
+    });
+    // Seed the lister's view state from the restored tab selection.
+    syncConnectionViewState();
+    connect(ui->connections->horizontalHeader(), &QHeaderView::sectionClicked, this, [=,this](int index)
+    {
+            Stats::ConnectionSort sortType;
+
+            switch (index)
+            {
+            case 1: sortType = Stats::ByProcess; break;
+            case 2: sortType = Stats::ByProtocol; break;
+            case 3: sortType = Stats::ByOutbound; break;
+            case 4: sortType = Stats::ByTraffic; break;
+            case 5: sortType = Stats::BySpeed; break;
+            default: sortType = Stats::Default; break;
+            }
+
+            Stats::connection_lister->setSort(sortType);
+            Stats::connection_lister->ForceUpdate();
+    });
+
+    // setup Speed Chart
+    speedChartWidget = new SpeedWidget(this);
+    ui->graph_tab->layout()->addWidget(speedChartWidget);
+
+    // table UI: model-backed view with on-demand row data
+    profilesTableModel = new ProfilesTableModel(this);
+    profilesFilterModel = new ProfilesFilterProxyModel(this);
+    profilesFilterModel->setSourceModel(profilesTableModel);
+    ui->profilesTableView->setModel(profilesFilterModel);
+    // Keep the start/stop button's enabled/disabled state in sync with selection.
+    connect(ui->profilesTableView->selectionModel(), &QItemSelectionModel::selectionChanged, this,
+            [this] { refresh_startstop_button(); });
+    ui->profilesTableView->rowsSwapped = [this](int row1, int row2)
+    {
+        // A drop position in a filtered list says nothing about the group's real order.
+        if (profilesFilterModel->hasActiveFilter()) return;
+        if (row1 == row2) return;
+        auto group = Configs::dataManager->groupsRepo->CurrentGroup();
+        group->EmplaceProfile(row1, row2);
+        profilesTableModel->emplaceProfiles(row1, row2);
+        Configs::dataManager->groupsRepo->Save(group);
+    };
+    connect(ui->profilesTableView->horizontalHeader(), &QHeaderView::sectionClicked, this, [=, this](int logicalIndex) {
+        GroupSortAction action;
+        if (proxy_last_order == logicalIndex) {
+            action.descending = true;
+            proxy_last_order = -1;
+        } else {
+            proxy_last_order = logicalIndex;
+        }
+        if (logicalIndex == ProfilesTableModel::ColType) {
+            auto group = Configs::dataManager->groupsRepo->CurrentGroup();
+            action.method = (Configs::dataManager->settingsRepo->show_config_security && group
+                             && group->type_sort_by == Configs::typeBy::bySecurity)
+                                ? GroupSortMethod::BySecurity
+                                : GroupSortMethod::ByType;
+        } else if (logicalIndex == ProfilesTableModel::ColAddress) {
+            action.method = GroupSortMethod::ByAddress;
+        } else if (logicalIndex == ProfilesTableModel::ColName) {
+            action.method = GroupSortMethod::ByName;
+        } else if (logicalIndex == ProfilesTableModel::ColTestResult) {
+            action.method = GroupSortMethod::ByTestResult;
+        } else if (logicalIndex == ProfilesTableModel::ColTraffic) {
+            action.method = GroupSortMethod::ByTraffic;
+        } else {
+            return;
+        }
+        runOnNewThread([=, this] {
+            auto currGroup = Configs::dataManager->groupsRepo->CurrentGroup();
+            if (currGroup == nullptr) return;
+            if (!currGroup->SortProfiles(action)) {
+                runOnUiThread([=] {
+                    MessageBoxWarning("Action already in progress", "A sort action is already in progress");
+                });
+                return;
+            }
+            Configs::dataManager->groupsRepo->Save(currGroup);
+            runOnUiThread([=, this] {
+                refresh_proxy_list({}, true);
+            });
+        });
+    });
+    connect(ui->profilesTableView->horizontalHeader(), &QHeaderView::sectionResized, this, [=, this](int, int, int) {
+        auto group = Configs::dataManager->groupsRepo->CurrentGroup();
+        if (Configs::dataManager->settingsRepo->refreshing_group || group == nullptr) return;
+        group->column_width.clear();
+        for (int i = 0; i < ui->profilesTableView->horizontalHeader()->count(); i++) {
+            group->column_width.push_back(ui->profilesTableView->horizontalHeader()->sectionSize(i));
+        }
+        Configs::dataManager->groupsRepo->Save(Configs::dataManager->groupsRepo->CurrentGroup());
+    });
+    ui->profilesTableView->horizontalHeader()->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(ui->profilesTableView->horizontalHeader(), &QWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
+        auto* header = ui->profilesTableView->horizontalHeader();
+        int columnIndex = header->logicalIndexAt(pos);
+        auto group = Configs::dataManager->groupsRepo->CurrentGroup();
+        if (group == nullptr) return;
+        if (columnIndex == ProfilesTableModel::ColType) {
+            if (!Configs::dataManager->settingsRepo->show_config_security) return;
+            QMenu menu(this);
+            auto* sortByLabel = menu.addAction(tr("Sort By:"));
+            sortByLabel->setEnabled(false);
+
+            struct TypeSortOption { Configs::typeBy value; QString label; };
+            const QList<TypeSortOption> options = {
+                { Configs::typeBy::byType, tr("Type") },
+                { Configs::typeBy::bySecurity, tr("Security") },
+            };
+            for (const auto& opt : options) {
+                auto* act = menu.addAction(opt.label);
+                act->setData(static_cast<int>(opt.value));
+                act->setCheckable(true);
+                act->setChecked(group->type_sort_by == opt.value);
+            }
+
+            auto* chosen = menu.exec(header->mapToGlobal(pos));
+            if (chosen == nullptr || !chosen->data().isValid()) return;
+
+            group->type_sort_by = static_cast<Configs::typeBy>(chosen->data().toInt());
+            Configs::dataManager->groupsRepo->Save(group);
+            GroupSortAction action;
+            action.method = group->type_sort_by == Configs::typeBy::bySecurity
+                                ? GroupSortMethod::BySecurity
+                                : GroupSortMethod::ByType;
+            runOnNewThread([=, this] {
+                auto currGroup = Configs::dataManager->groupsRepo->CurrentGroup();
+                if (currGroup == nullptr) return;
+                if (!currGroup->SortProfiles(action)) {
+                    runOnUiThread([=] {
+                        MessageBoxWarning("Action already in progress", "A sort action is already in progress");
+                    });
+                    return;
+                }
+                Configs::dataManager->groupsRepo->Save(currGroup);
+                runOnUiThread([=, this] {
+                    refresh_proxy_list({}, true);
+                });
+            });
+            return;
+        }
+        if (columnIndex == ProfilesTableModel::ColTestResult) {
+            QMenu menu(this);
+            auto* includeLabel = menu.addAction(tr("Include:"));
+            includeLabel->setEnabled(false);
+
+            auto* actionShowOutIP = menu.addAction(tr("Out IP"));
+            actionShowOutIP->setCheckable(true);
+            actionShowOutIP->setChecked(group->test_items_to_show == Configs::testShowItems::all ||
+                group->test_items_to_show == Configs::testShowItems::ipOnly);
+
+            auto* actionShowSpeed = menu.addAction(tr("Speed"));
+            actionShowSpeed->setCheckable(true);
+            actionShowSpeed->setChecked(group->test_items_to_show == Configs::testShowItems::all ||
+                group->test_items_to_show == Configs::testShowItems::speedOnly);
+
+            auto updateTestItemsToShow = [this, group, actionShowOutIP, actionShowSpeed] {
+                    const bool ip = actionShowOutIP->isChecked();
+                    const bool speed = actionShowSpeed->isChecked();
+                    if (ip && speed) group->test_items_to_show = Configs::testShowItems::all;
+                    else if (ip) group->test_items_to_show = Configs::testShowItems::ipOnly;
+                    else if (speed) group->test_items_to_show = Configs::testShowItems::speedOnly;
+                    else group->test_items_to_show = Configs::testShowItems::none;
+                    Configs::dataManager->groupsRepo->Save(group);
+                    if (group->calculated_column_width.size() > ProfilesTableModel::ColTestResult) {
+                        group->calculated_column_width[ProfilesTableModel::ColTestResult] = 0;
+                    }
+                    refresh_proxy_list();
+                };
+
+            connect(actionShowOutIP, &QAction::triggered, this, updateTestItemsToShow);
+            connect(actionShowSpeed, &QAction::triggered, this, updateTestItemsToShow);
+
+            menu.addSeparator();
+            auto* sortByLabel = menu.addAction(tr("Sort By:"));
+            sortByLabel->setEnabled(false);
+
+            struct SortOption { int value; QString label; };
+            QList<SortOption> options = {
+                { static_cast<int>(Configs::testBy::latency), tr("Latency") },
+                { static_cast<int>(Configs::testBy::dlSpeed), tr("Download Speed") },
+                { static_cast<int>(Configs::testBy::ulSpeed), tr("Upload Speed") },
+                { static_cast<int>(Configs::testBy::ipOut), tr("IP Out") }
+            };
+            for (const auto& opt : options) {
+                auto* act = menu.addAction(opt.label);
+                act->setData(opt.value);
+                act->setCheckable(true);
+                act->setChecked(static_cast<int>(group->test_sort_by) == opt.value);
+            }
+
+            auto* chosen = menu.exec(header->mapToGlobal(pos));
+            if (chosen == nullptr || !chosen->data().isValid()) return;
+
+            int testSortBy = chosen->data().toInt();
+            group->test_sort_by = static_cast<Configs::testBy>(testSortBy);
+            Configs::dataManager->groupsRepo->Save(group);
+            GroupSortAction action;
+            action.method = GroupSortMethod::ByTestResult;
+            action.descending = true;
+            runOnNewThread([=, this] {
+                auto currGroup = Configs::dataManager->groupsRepo->CurrentGroup();
+                if (currGroup == nullptr) return;
+                if (!currGroup->SortProfiles(action)) {
+                    runOnUiThread([=] {
+                        MessageBoxWarning("Action already in progress", "A sort action is already in progress");
+                        });
+                    return;
+                }
+                Configs::dataManager->groupsRepo->Save(currGroup);
+                runOnUiThread([=, this] {
+                    refresh_proxy_list({}, true);
+                    });
+                });
+            return;
+        }
+        if (columnIndex == ProfilesTableModel::ColTraffic) {
+            QMenu menu(this);
+            auto* sortByLabel = menu.addAction(tr("Sort By:"));
+            sortByLabel->setEnabled(false);
+
+            struct TrafficSortOption { int value; QString label; };
+            QList<TrafficSortOption> options = {
+                { 0, tr("Total") },
+                { 1, tr("Downloaded") },
+                { 2, tr("Uploaded") }
+            };
+
+            for (const auto& opt : options) {
+                auto* act = menu.addAction(opt.label);
+                act->setData(opt.value);
+                act->setCheckable(true);
+                act->setChecked(static_cast<int>(group->traffic_sort_by) == opt.value);
+            }
+
+            auto* chosen = menu.exec(header->mapToGlobal(pos));
+            if (chosen == nullptr || !chosen->data().isValid()) return;
+
+            int trafficSortBy = chosen->data().toInt();
+            group->traffic_sort_by = static_cast<Configs::trafficBy>(trafficSortBy);
+            Configs::dataManager->groupsRepo->Save(group);
+            GroupSortAction action;
+            action.method = GroupSortMethod::ByTraffic;
+            action.descending = false;
+            runOnNewThread([=, this] {
+                auto currGroup = Configs::dataManager->groupsRepo->CurrentGroup();
+                if (currGroup == nullptr) return;
+                if (!currGroup->SortProfiles(action)) {
+                    runOnUiThread([=] {
+                        MessageBoxWarning("Action already in progress", "A sort action is already in progress");
+                        });
+                    return;
+                }
+                Configs::dataManager->groupsRepo->Save(Configs::dataManager->groupsRepo->CurrentGroup());
+                runOnUiThread([=, this] {
+                    refresh_proxy_list();
+                    });
+                });
+            return;
+        }
+    });
+    ui->profilesTableView->verticalHeader()->setStretchLastSection(false);
+    ui->profilesTableView->verticalHeader()->setDefaultSectionSize(24);
+    ui->profilesTableView->verticalHeader()->setSectionResizeMode(QHeaderView::Fixed);
+    ui->profilesTableView->setTabKeyNavigation(false);
+    ui->profilesTableView->horizontalHeader()->setResizeContentsPrecision(0);
+
+    connect(ui->profilesTableView->verticalScrollBar(), &QScrollBar::valueChanged, ui->profilesTableView, [=, this] {
+        if (!ui->profilesTableView->isVisible()) return;
+        refresh_proxy_list_column_size();
+    });
+
+    // search box
+    auto *filterHeader = static_cast<ProfilesTableFilterHeader*>(ui->profilesTableView->horizontalHeader());
+    filterHeader->setLastFilterColumn(Configs::dataManager->settingsRepo->last_filter_column);
+    connect(filterHeader, &ProfilesTableFilterHeader::lastFilterColumnChanged, this, [](int column)
+    {
+        Configs::dataManager->settingsRepo->last_filter_column = column;
+        Configs::dataManager->settingsRepo->Save();
+    });
+
+    m_filterRefreshDebounce = new QTimer(this);
+    m_filterRefreshDebounce->setSingleShot(true);
+    m_filterRefreshDebounce->setInterval(50);
+    connect(m_filterRefreshDebounce, &QTimer::timeout, this, [this] { applyProfileFilters(); });
+
+    connect(filterHeader, &ProfilesTableFilterHeader::typeFilterChanged, this, [this](const QString& currentText)
+    {
+       typeFilterString = currentText;
+       m_filterRefreshDebounce->start();
+    });
+    connect(filterHeader, &ProfilesTableFilterHeader::addressFilterChanged, this, [this](const QString& currentText)
+    {
+       addressFilterString = currentText;
+       m_filterRefreshDebounce->start();
+    });
+    connect(filterHeader, &ProfilesTableFilterHeader::nameFilterChanged, this, [this](const QString& currentText)
+    {
+       nameFilterString = currentText;
+       m_filterRefreshDebounce->start();
+    });
+    connect(filterHeader, &ProfilesTableFilterHeader::testFilterChanged, this, [this](const QString& currentText)
+    {
+       countryFilterString = currentText;
+       m_filterRefreshDebounce->start();
+    });
+    connect(filterHeader, &ProfilesTableFilterHeader::focusTableRequested, this,
+            [this](bool selectFirst) { focusProfilesTable(selectFirst); });
+
+    // refresh
+    this->refresh_groups();
+
+    // Setup Tray
+    tray = new QSystemTrayIcon(nullptr);
+    tray->setIcon(GetTrayIcon(Icon::NONE));
+    QApplication::setWindowIcon(Icon::GetTrayIcon(Icon::NONE));
+    trayMenu = new QMenu();
+    trayMenu->addAction(ui->actionShow_window);
+    trayMenu->addSeparator();
+    trayMenu->addAction(ui->actionStart_with_system);
+    trayMenu->addAction(ui->actionRemember_last_proxy);
+    trayMenu->addAction(ui->actionAllow_LAN);
+    trayMenu->addSeparator();
+
+    auto *actSelectServer = new QAction(tr("Select Profile"), trayMenu);
+    connect(actSelectServer, &QAction::triggered, this, [this]() { openTraySelector(false); });
+    trayMenu->addAction(actSelectServer);
+    auto *actSelectRouting = new QAction(tr("Select Routing"), trayMenu);
+    connect(actSelectRouting, &QAction::triggered, this, [this]() { openTraySelector(true); });
+    trayMenu->addAction(actSelectRouting);
+    auto *actOtpCodes = new QAction(tr("OTP Codes"), trayMenu);
+    connect(actOtpCodes, &QAction::triggered, this, [this]() { openTrayOtpCodes(); });
+    trayMenu->addAction(actOtpCodes);
+    // MacOS cannot reuse menus across different parents properly
+    if (getOS() == Darwin) {
+        auto* traySpmodeMenu = new QMenu(ui->menu_spmode->title(), trayMenu);
+        traySpmodeMenu->addAction(ui->menu_spmode_system_proxy);
+        traySpmodeMenu->addAction(ui->menu_spmode_vpn);
+        connect(traySpmodeMenu, &QMenu::aboutToShow, this, [=,this]() {
+            ui->menu_spmode_disabled->setChecked(!(Configs::dataManager->settingsRepo->spmode_system_proxy || Configs::dataManager->settingsRepo->spmode_vpn));
+            ui->menu_spmode_system_proxy->setChecked(Configs::dataManager->settingsRepo->spmode_system_proxy);
+            ui->menu_spmode_vpn->setChecked(Configs::dataManager->settingsRepo->spmode_vpn);
+        });
+        trayMenu->addMenu(traySpmodeMenu);
+    } else {
+        trayMenu->addMenu(ui->menu_spmode);
+    }
+    trayMenu->addSeparator();
+
+    trayMenu->addAction(ui->actionRestart_Proxy);
+    trayMenu->addAction(ui->actionRestart_Program);
+    trayMenu->addAction(ui->menu_exit);
+    tray->setVisible(!Configs::dataManager->settingsRepo->disable_tray);
+    tray->setContextMenu(trayMenu);
+    connect(tray, &QSystemTrayIcon::activated, qApp, [=, this](QSystemTrayIcon::ActivationReason reason) {
+        if (reason == QSystemTrayIcon::Trigger && getOS() != Darwin) {
+            trayClickEvent();
+        }
+    });
+
+    // Misc menu
+    ui->actionRemember_last_proxy->setChecked(Configs::dataManager->settingsRepo->remember_enable);
+    ui->actionStart_with_system->setChecked(
+        !safeCanary && AutoRun_IsEnabled());
+    ui->actionAllow_LAN->setChecked(QStringList{"::", "0.0.0.0"}.contains(Configs::dataManager->settingsRepo->inbound_address));
+
+    connect(ui->actionHide_window, &QAction::triggered, this, [=, this](){ HideWindow(this); });
+    connect(ui->menu_open_config_folder, &QAction::triggered, this, [=,this] { QDesktopServices::openUrl(QUrl::fromLocalFile(QDir::currentPath())); });
+    connect(ui->actionRestart_Proxy, &QAction::triggered, this, [=,this] {
+        runOnThread([=, this] {
+            profile_stop(true, true, true);
+            if (core_process) core_process->Kill();
+        }, DS_cores);
+    });
+    connect(ui->actionRestart_Program, &QAction::triggered, this, [=,this] { MW_dialog_message(MwMessage::RestartProgram, {}); });
+    connect(ui->actionShow_window, &QAction::triggered, this, [=,this] { ActivateWindow(this); });
+    connect(ui->actionRemember_last_proxy, &QAction::triggered, this, [=,this](bool checked) {
+        Configs::dataManager->settingsRepo->remember_enable = checked;
+        ui->actionRemember_last_proxy->setChecked(checked);
+        Configs::dataManager->settingsRepo->Save();
+    });
+    connect(ui->actionStart_with_system, &QAction::triggered, this, [=,this](bool checked) {
+        AutoRun_SetEnabled(checked);
+        ui->actionStart_with_system->setChecked(checked);
+    });
+    connect(ui->actionAllow_LAN, &QAction::triggered, this, [=,this](bool checked) {
+        Configs::dataManager->settingsRepo->inbound_address = checked ? "::" : "127.0.0.1";
+        ui->actionAllow_LAN->setChecked(checked);
+        MW_dialog_message(MwMessage::UpdateSettings, {});
+    });
+    //
+    connect(ui->checkBox_VPN, &QCheckBox::clicked, this, [=,this](bool checked) { set_spmode_vpn(checked); });
+    connect(ui->checkBox_SystemProxy, &QCheckBox::clicked, this, [=,this](bool checked) { set_spmode_system_proxy(checked); });
+    connect(ui->menu_spmode, &QMenu::aboutToShow, this, [=,this]() {
+        ui->menu_spmode_disabled->setChecked(!(Configs::dataManager->settingsRepo->spmode_system_proxy || Configs::dataManager->settingsRepo->spmode_vpn));
+        ui->menu_spmode_system_proxy->setChecked(Configs::dataManager->settingsRepo->spmode_system_proxy);
+        ui->menu_spmode_vpn->setChecked(Configs::dataManager->settingsRepo->spmode_vpn);
+    });
+    connect(ui->menu_spmode_system_proxy, &QAction::triggered, this, [=,this](bool checked) { set_spmode_system_proxy(checked); });
+    connect(ui->menu_spmode_vpn, &QAction::triggered, this, [=,this](bool checked) { set_spmode_vpn(checked); });
+    connect(ui->menu_spmode_disabled, &QAction::triggered, this, [=,this]() {
+        set_spmode_system_proxy(false);
+        set_spmode_vpn(false);
+    });
+    connect(ui->menu_qr, &QAction::triggered, this, [=,this]() { display_qr_link(false); });
+    connect(ui->system_dns, &QCheckBox::clicked, this, [=,this](bool checked) {
+        if (const auto ok = set_system_dns(checked); !ok) {
+            ui->system_dns->setChecked(!checked);
+        } else {
+            refresh_status();
+        }
+    });
+    if (Configs::dataManager->settingsRepo->show_system_dns) ui->system_dns->show();
+    else ui->system_dns->hide();
+
+    connect(ui->menu_server, &QMenu::aboutToShow, this, [=,this](){
+        if (auto selected = get_now_selected_list(); selected.empty())
+        {
+            ui->actionSpeedtest_Selected->setEnabled(false);
+            ui->actionUrl_Test_Selected->setEnabled(false);
+            ui->menu_resolve_selected->setEnabled(false);
+            ui->actionResolve_Selected_Out_IP->setEnabled(false);
+        } else
+        {
+            ui->actionSpeedtest_Selected->setEnabled(true);
+            ui->actionUrl_Test_Selected->setEnabled(true);
+            ui->menu_resolve_selected->setEnabled(true);
+            ui->actionResolve_Selected_Out_IP->setEnabled(true);
+        }
+        if (testRunner->isRunning()) {
+            ui->menu_server->addAction(ui->menu_stop_testing);
+        } else {
+            ui->menu_server->removeAction(ui->menu_stop_testing);
+        }
+    });
+
+    connect(ui->menuTesting, &QMenu::aboutToShow, this, [=,this](){
+        // Deleting the last remaining group is not allowed.
+        ui->actionDelete_Group->setEnabled(Configs::dataManager->groupsRepo->GetAllGroupIds().size() > 1);
+        if (testRunner->isRunning()) {
+            ui->menuTesting->addAction(ui->menu_stop_testing);
+        } else {
+            ui->menuTesting->removeAction(ui->menu_stop_testing);
+        }
+    });
+
+    connect(ui->menuTools, &QMenu::aboutToShow, this, [=,this](){
+        // Speedtest Current only makes sense against a live instance.
+        ui->actionSpeedtest_Current->setEnabled(running != nullptr);
+    });
+
+    connect(ui->actionAdd_New_Group, &QAction::triggered, this, [=,this]{
+        auto ent = Configs::dataManager->groupsRepo->NewGroup();
+        auto dialog = new DialogEditGroup(ent, this);
+        int ret = dialog->exec();
+        dialog->deleteLater();
+
+        if (ret == QDialog::Accepted) {
+            Configs::dataManager->groupsRepo->AddGroup(ent);
+            MW_dialog_message(MwMessage::GroupsChanged, {});
+        }
+    });
+
+    connect(ui->actionEdit_Group, &QAction::triggered, this, [=,this]{
+        auto ent = Configs::dataManager->groupsRepo->CurrentGroup();
+        auto dialog = new DialogEditGroup(ent, this);
+        connect(dialog, &QDialog::finished, this, [=,this] {
+            if (dialog->result() == QDialog::Accepted) {
+                Configs::dataManager->groupsRepo->Save(ent);
+                MW_dialog_message(MwMessage::GroupsChanged, {});
+            }
+            dialog->deleteLater();
+        });
+        dialog->show();
+    });
+
+    connect(ui->actionDelete_Group, &QAction::triggered, this, [=,this]{
+        if (Configs::dataManager->groupsRepo->GetAllGroupIds().size() <= 1) return;
+        auto id = Configs::dataManager->groupsRepo->CurrentGroup()->id;
+        if (QMessageBox::question(this, tr("Confirmation"), tr("Remove %1?").arg(Configs::dataManager->groupsRepo->GetGroup(id)->name)) ==
+            QMessageBox::StandardButton::Yes) {
+            if (running != nullptr) {
+                if (running->gid == id) profile_stop(false, true, false);
+            }
+            Configs::dataManager->groupsRepo->DeleteGroup(id);
+            MW_dialog_message(MwMessage::GroupsChanged, {});
+        }
+    });
+
+    connect(ui->actionUpdate_All_Subscriptions, &QAction::triggered, this, [=,this]{
+        if (QMessageBox::question(this, tr("Confirmation"), tr("Update all subscriptions?")) == QMessageBox::StandardButton::Yes) {
+            UI_update_all_groups();
+        }
+    });
+
+    connect(ui->actionRefresh_Column_Widths, &QAction::triggered, this, [=, this] {
+        auto ent = Configs::dataManager->groupsRepo->CurrentGroup();
+        ent->column_width.clear();
+        Configs::dataManager->groupsRepo->Save(ent);
+        show_group(ent->id);
+    });
+
+    connect(ui->menuRouting_Menu, &QMenu::aboutToShow, this, [=,this]()
+    {
+        ui->menuRouting_Menu->clear();
+        ui->menuRouting_Menu->addAction(ui->menu_routing_settings);
+
+        auto* actionAdblock = new QAction(ui->menuRouting_Menu);
+        actionAdblock->setText(tr("Enable AdBlock"));
+        actionAdblock->setCheckable(true);
+        actionAdblock->setChecked(Configs::dataManager->settingsRepo->adblock_enable);
+        connect(actionAdblock, &QAction::triggered, this, [=,this](bool checked) {
+            Configs::dataManager->settingsRepo->adblock_enable = checked;
+            actionAdblock->setChecked(checked);
+            Configs::dataManager->settingsRepo->Save();
+            if (Configs::dataManager->settingsRepo->started_id >= 0) profile_start(Configs::dataManager->settingsRepo->started_id);
+        });
+        ui->menuRouting_Menu->addAction(actionAdblock);
+
+        auto* actionWarp = new QAction(ui->menuRouting_Menu);
+        actionWarp->setText(tr("Enable Warp"));
+        actionWarp->setCheckable(true);
+        actionWarp->setChecked(Configs::dataManager->settingsRepo->enable_warp);
+        connect(actionWarp, &QAction::triggered, this, [=,this](bool checked) {
+            if (checked && !Configs::dataManager->settingsRepo->HasUsableWarpConfig()) {
+                actionWarp->setChecked(false);
+                Configs::dataManager->settingsRepo->enable_warp = false;
+                Configs::dataManager->settingsRepo->Save();
+                MessageBoxWarning(
+                    tr("Warp is not configured"),
+                    tr("Generate the Warp configuration in Routing Settings before enabling it."));
+                return;
+            }
+            Configs::dataManager->settingsRepo->enable_warp = checked;
+            actionWarp->setChecked(checked);
+            Configs::dataManager->settingsRepo->Save();
+            if (Configs::dataManager->settingsRepo->started_id >= 0) profile_start(Configs::dataManager->settingsRepo->started_id);
+        });
+        ui->menuRouting_Menu->addAction(actionWarp);
+
+        QMenu* profilesMenu = ui->menuRouting_Menu->addMenu(QObject::tr("Download Profiles"));
+        for (const QString &country : QStringList{"China", "Iran", "Russia"})
+        {
+            auto* action = new QAction(profilesMenu);
+            action->setText(country);
+            connect(action, &QAction::triggered, this, [=,this]()
+            {
+                auto resp = NetworkRequestHelper::HttpGet(Configs::get_jsdelivr_link("https://raw.githubusercontent.com/throneproj/routeprofiles/profile/Profile_" + country));
+                if (!resp.error.isEmpty()) {
+                    runOnUiThread([=] {
+                        MessageBoxWarning(QObject::tr("Download Profiles"), QObject::tr("Requesting profile error: %1").arg(resp.error + "\n" + resp.data));
+                    });
+                    return;
+                }
+                handle_add_remote_routes(resp.data);
+            });
+            profilesMenu->addAction(action);
+        }
+
+        ui->menuRouting_Menu->addSeparator();
+        for (const auto& route : Configs::dataManager->routesRepo->GetAllRouteProfiles())
+        {
+            auto* action = new QAction(ui->menuRouting_Menu);
+            action->setText(route->name);
+            action->setData(route->id);
+            action->setCheckable(true);
+            action->setChecked(Configs::dataManager->settingsRepo->current_route_id == route->id);
+            connect(action, &QAction::triggered, this, [=,this]()
+            {
+                auto routeID = action->data().toInt();
+                if (Configs::dataManager->settingsRepo->current_route_id == routeID) return;
+                Configs::dataManager->settingsRepo->current_route_id = routeID;
+                Configs::dataManager->settingsRepo->Save();
+                if (Configs::dataManager->settingsRepo->started_id >= 0) profile_start(Configs::dataManager->settingsRepo->started_id);
+            });
+            ui->menuRouting_Menu->addAction(action);
+        }
+    });
+    connect(ui->actionClear_Test_Result, &QAction::triggered, this, [=, this]() {
+        auto entIDs = get_now_selected_list();
+        auto ents = Configs::dataManager->profilesRepo->GetProfileBatch(entIDs);
+        if (ents.empty()) return;
+        for (const auto &ent: ents) {
+            ent->ClearTestResults();
+        }
+        Configs::dataManager->profilesRepo->SaveBatch(ents);
+        if (auto group = Configs::dataManager->groupsRepo->GetGroup(ents.first()->gid); group &&
+            group->calculated_column_width.size() > ProfilesTableModel::ColTestResult)
+            group->calculated_column_width[ProfilesTableModel::ColTestResult] = 0;
+        refresh_proxy_list();
+    });
+    connect(ui->actionUrl_Test_Selected, &QAction::triggered, this, [=,this]() {
+        testRunner->runUrlTests(get_now_selected_list());
+    });
+    connect(ui->actionUrl_Test_Group, &QAction::triggered, this, [=,this]() {
+        testRunner->runUrlTests(Configs::dataManager->groupsRepo->CurrentGroup()->Profiles());
+    });
+    connect(ui->actionSpeedtest_Current, &QAction::triggered, this, [=,this]()
+    {
+        if (running != nullptr)
+        {
+            testRunner->runSpeedTests({}, true);
+        }
+    });
+    connect(ui->actionSpeedtest_Selected, &QAction::triggered, this, [=,this]()
+    {
+        testRunner->runSpeedTests(get_now_selected_list());
+    });
+    connect(ui->actionSpeedtest_Group, &QAction::triggered, this, [=,this]()
+    {
+        testRunner->runSpeedTests(Configs::dataManager->groupsRepo->CurrentGroup()->Profiles());
+    });
+    connect(ui->actionResolve_Selected_Out_IP, &QAction::triggered, this, [=,this]() {
+        testRunner->runIpTests(get_now_selected_list());
+    });
+    connect(ui->actionResolve_Out_IP, &QAction::triggered, this, [=,this]() {
+        testRunner->runIpTests(Configs::dataManager->groupsRepo->CurrentGroup()->Profiles());
+    });
+    connect(ui->menu_stop_testing, &QAction::triggered, this, [=,this]() { testRunner->stop(); });
+    //
+    auto set_selected_or_group = [=,this](int mode) {
+        // 0=group 1=select 2=unknown(menu is hide)
+        ui->menu_server->setProperty("selected_or_group", mode);
+    };
+    connect(ui->menu_server, &QMenu::aboutToHide, this, [=,this] {
+        setTimeout([=,this] { set_selected_or_group(2); }, this, 200);
+    });
+    set_selected_or_group(2);
+    //
+    connect(ui->menu_share_item, &QMenu::aboutToShow, this, [=,this] {
+        QString name;
+        auto selected = get_now_selected_list();
+
+        ui->menu_export_config->setVisible(false);
+        ui->actionExport_Xray_config->setVisible(false);
+        if (selected.isEmpty()) return;
+
+        auto profile = Configs::dataManager->profilesRepo->GetProfile(selected.first());
+        if (!profile) return;
+
+        if (selected.count() == 1 && profile->DisplayTestResult().trimmed().isEmpty()) {
+            ui->actionCopy_Test_Result->setVisible(false);
+        } else {
+            ui->actionCopy_Test_Result->setVisible(true);
+        }
+
+        ui->menu_export_config->setVisible(true);
+        if (profile->outbound->IsXray() || profile->type == "chain") ui->actionExport_Xray_config->setVisible(true);
+    });
+    connect(ui->actionExport_Xray_config, &QAction::triggered, this, [=,this]() {
+        auto ents = get_now_selected_list();
+        if (ents.count() != 1) return;
+        auto ent = Configs::dataManager->profilesRepo->GetProfile(ents.first());
+
+        auto result = Configs::BuildSingBoxConfig(ent);
+        if (!result->error.isEmpty()) {
+            MessageBoxWarning("Build config error", result->error);
+            return;
+        }
+        QString config_core = QJsonObject2QString(result->xrayConfig, true);
+        QApplication::clipboard()->setText(config_core);
+
+        QMessageBox msg(QMessageBox::Information, tr("Config copied"), config_core);
+        QPushButton *button_1 = msg.addButton(tr("Copy core config"), QMessageBox::YesRole);
+        QPushButton *button_2 = msg.addButton(tr("Copy test config"), QMessageBox::YesRole);
+        msg.addButton(QMessageBox::Ok);
+        msg.setEscapeButton(QMessageBox::Ok);
+        msg.setDefaultButton(QMessageBox::Ok);
+        msg.exec();
+        if (msg.clickedButton() == button_1) {
+            QApplication::clipboard()->setText(config_core);
+        } else if (msg.clickedButton() == button_2) {
+            auto res = Configs::BuildTestConfig({ent});
+            if (!res->error.isEmpty()) {
+                MessageBoxWarning("Build Test config error", res->error);
+                return;
+            }
+            config_core = QJsonObject2QString(res->xrayConfig, true);
+            QApplication::clipboard()->setText(config_core);
+        }
+    });
+    connect(ui->actionCopy_Test_Result, &QAction::triggered, this, [=,this]() {
+        auto ents = get_now_selected_list();
+        if (ents.count() == 0 || ents.count() > 1000) return;
+        auto entList = Configs::dataManager->profilesRepo->GetProfileBatch(ents);
+        QString res;
+        int counter = 0;
+        for (auto ent : entList) {
+            auto testRes = ent->DisplayTestResult();
+            if (!testRes.trimmed().isEmpty()) {
+                res += testRes.trimmed() + "\n";
+                counter++;
+            }
+        }
+        QApplication::clipboard()->setText(res);
+        MW_show_log(QString::number(counter) + tr(" Test result(s) copied to clipboard!"));
+    });
+    connect(ui->actionAdd_profile_from_File, &QAction::triggered, this, [=,this]()
+    {
+        // "All files" is listed first so it is the default: config files routinely
+        // carry no extension, and a type filter would hide them from the picker.
+        const auto filters = QStringList{
+            tr("All files (*)"),
+            tr("Config files (*.json *.conf *.txt *.yaml *.yml *.ini)"),
+            tr("QR code images (*.png *.jpg *.jpeg *.bmp *.gif *.webp)"),
+        };
+        const auto paths = QFileDialog::getOpenFileNames(this, tr("Select profile files"), QString(), filters.join(";;"));
+        if (paths.isEmpty()) return;
+        importFromFiles(paths);
+    });
+
+    connect(qApp, &QGuiApplication::commitDataRequest, this, &MainWindow::on_commitDataRequest);
+
+    auto t = new QTimer;
+    connect(t, &QTimer::timeout, this, [=,this]() { refresh_status(); });
+    t->start(2000);
+
+    t = new QTimer;
+    connect(t, &QTimer::timeout, this, [&] { Configs_sys::logCounter.fetchAndStoreRelaxed(0); });
+    t->start(1000);
+
+    // Debounced so font/theme/resize changes settle; fired from changeEvent,
+    // resizeEvent and ThemeManager::themeChanged.
+    m_proxyListRefreshDebounce = new QTimer(this);
+    m_proxyListRefreshDebounce->setSingleShot(true);
+    connect(m_proxyListRefreshDebounce, &QTimer::timeout, this, [this] { refresh_proxy_list({}, false); });
+
+    // The auto-selector monitor polls the core from its own thread; both
+    // handlers are queued onto the UI thread.
+    connect(Stats::autoSelectorMonitor, &Stats::AutoSelectorMonitor::poolExhausted, this,
+            [this](int profileID) { on_auto_selector_exhausted(profileID); }, Qt::QueuedConnection);
+    connect(Stats::autoSelectorMonitor, &Stats::AutoSelectorMonitor::updated, this,
+            [this] { refresh_auto_selector_view(); }, Qt::QueuedConnection);
+
+    // The runner persists each job's last-run time, so closing the app past the
+    // interval still triggers an update next launch instead of resetting the clock.
+    if (!safeCanary) {
+        auto* runner = Throne::PeriodicRunner::instance();
+        // Settings store the interval sign-encoded (negative = disabled); < 30 min is
+        // treated as off, matching the "invalid if less than 30" UI hint.
+        const auto minutesOf = [](int v) { return v >= 30 ? v : 0; };
+        // Subscription freshness belongs to each group and is advanced only on
+        // success. Retry failures separately instead of postponing them six hours.
+        auto *subscriptionTimer = new QTimer(this);
+        connect(subscriptionTimer, &QTimer::timeout, this, [] { UI_update_all_groups(true, true); });
+        subscriptionTimer->start(60000);
+        QTimer::singleShot(10000, this, [] { UI_update_all_groups(true, true); });
+        runner->Add({
+            tr("routing profiles"),
+            [minutesOf] { return minutesOf(Configs::dataManager->settingsRepo->route_auto_update); },
+            [] { return Configs::dataManager->settingsRepo->route_auto_update_last; },
+            [](qint64 t) {
+                Configs::dataManager->settingsRepo->route_auto_update_last = t;
+                Configs::dataManager->settingsRepo->Save();
+            },
+            [] { UI_update_all_remote_routes(true); },
+        });
+    }
+
+    if (safeCanary) {
+        setWindowTitle("Throne | Safe canary (read-only)");
+        if (centralWidget()) centralWidget()->setEnabled(false);
+        if (menuBar()) menuBar()->setEnabled(false);
+        tray->hide();
+        show();
+    } else if (!Configs::dataManager->settingsRepo->flag_tray) {
+        show();
+    }
+
+    ui->data_view->setStyleSheet("background: transparent; border: none;");
+}
+
+MainWindow::~MainWindow() {
+    delete ui;
+}
+
