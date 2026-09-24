@@ -29,6 +29,10 @@ namespace Configs::QuickRoute {
         int scriptErrors = 0;
         int htmlErrorPages = 0;
     };
+    struct BrowserCaptureCandidate {
+        QString domain;
+        QString reason; // html_error, http_error, network_error, or observed_host
+    };
 
     Target parseSiteOrIp(const QString& input);
     QString registrableDomain(const QString& host);
@@ -40,6 +44,8 @@ namespace Configs::QuickRoute {
     SiteDiagnostics analyzeConsoleText(const QString& log, const QString& mainDomain);
     SiteDiagnostics analyzeHar(const QByteArray& data, const QString& mainDomain,
                                QString* error = nullptr);
+    QList<BrowserCaptureCandidate> readBrowserCaptureCandidates(const QJsonObject& capture,
+                                                                 const QString& mainDomain);
     bool insertRule(RouteProfile& profile, const QJsonObject& record, QString* error = nullptr);
     bool removeRule(RouteProfile& profile, const QJsonObject& record, QString* error = nullptr);
     QList<QJsonObject> readRecords(const QString& json);

@@ -66,12 +66,12 @@
 
   <section class="panel" aria-labelledby="send-title">
     <div class="panel-head"><h2 id="send-title">Что передаётся в Throne</h2><span id="delivery" class="count">Нет захвата</span></div>
-    <p id="payload-meta">Домен сайта, домены ошибок и число блокировок браузером.</p>
+    <p id="payload-meta">Домен сайта, домены ошибок и замеченные домены без ошибки.</p>
     <div id="events" class="list"><div class="empty">Пока нечего передавать.</div></div>
     <button id="send" type="button" hidden>Повторить передачу</button>
   </section>
 
-  <footer>Полные ссылки и параметры запросов не сохраняются. В Throne передаются домен сайта, домены ошибок и число блокировок браузером; общий список доменов остаётся в расширении.</footer>
+  <footer>Полные ссылки и параметры запросов не сохраняются. Throne получает домены ошибок и до 100 других замеченных доменов как неотмеченные кандидаты. Заблокированные браузером запросы не считаются ошибкой маршрута.</footer>
 </main>
 <script src="popup.js"></script>
 </body>

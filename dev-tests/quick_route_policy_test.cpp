@@ -103,6 +103,11 @@ int main(int argc, char** argv) {
     assert(!error.isEmpty());
     assert(removeRule(raw, record, &error));
     assert(QJsonDocument::fromJson(raw.rawRoute.toUtf8()).object().value("rules").toArray().size() == 1);
+    assert(removeRule(raw, record, &error)); // A stale menu entry can outlive its raw rule.
+    Configs::RouteProfile alteredRaw;
+    alteredRaw.isRaw = true;
+    alteredRaw.rawRoute = R"({"rules":[{"action":"route","domain_suffix":["example.com"],"outbound":"proxy"}]})";
+    assert(!removeRule(alteredRaw, record, &error)); // Do not erase metadata for a changed rule.
 
     Configs::RouteProfile structured;
     assert(insertRule(structured, record, &error));
@@ -125,6 +130,15 @@ int main(int argc, char** argv) {
 
     const QList<QJsonObject> records{record};
     assert(readRecords(writeRecords(records)).size() == 1);
+
+    const QJsonObject browserCapture{
+        {"events", QJsonArray{QJsonObject{{"host", "example.org"}, {"reason", "http_error"}}}},
+        {"observed", QJsonArray{"player.example.net", "example.org", "example.com"}}
+    };
+    const auto browserCandidates = readBrowserCaptureCandidates(browserCapture, "example.com");
+    assert(browserCandidates.size() == 2);
+    assert(browserCandidates.at(0).domain == "example.org" && browserCandidates.at(0).reason == "http_error");
+    assert(browserCandidates.at(1).domain == "example.net" && browserCandidates.at(1).reason == "observed_host");
 
     if (argc > 1) {
         QFile capture(QString::fromLocal8Bit(argv[1]));

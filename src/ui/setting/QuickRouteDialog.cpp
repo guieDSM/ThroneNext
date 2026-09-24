@@ -621,32 +621,33 @@ void QuickRouteDialog::acceptBrowserCapture(const QByteArray& body) {
         return;
     }
     int added = 0;
-    const QJsonArray events = capture.value(QStringLiteral("events")).toArray();
-    for (int index = 0; index < events.size() && index < 100; ++index) {
-        const QJsonObject event = events.at(index).toObject();
-        const auto domain = Configs::QuickRoute::parseSiteOrIp(event.value(QStringLiteral("host")).toString());
-        if (domain.kind != QStringLiteral("site") || domain.value == target.value) continue;
+    int observedAdded = 0;
+    for (const auto& candidate : Configs::QuickRoute::readBrowserCaptureCandidates(capture, target.value)) {
         bool exists = false;
         for (int i = 0; i < candidates_->count(); ++i)
-            exists |= candidates_->item(i)->data(Qt::UserRole).toString() == domain.value;
+            exists |= candidates_->item(i)->data(Qt::UserRole).toString() == candidate.domain;
         if (exists) continue;
-        const QString reason = event.value(QStringLiteral("reason")).toString();
+        const QString& reason = candidate.reason;
         QString issue;
         if (reason == QStringLiteral("html_error")) issue = tr("страница ошибки в кадре");
         else if (reason == QStringLiteral("http_error")) issue = tr("HTTP-ошибка ресурса");
         else if (reason == QStringLiteral("network_error")) issue = tr("ошибка соединения");
+        else if (reason == QStringLiteral("observed_host")) {
+            issue = tr("обнаружен во вкладке без сетевой ошибки");
+            ++observedAdded;
+        }
         else continue;
         auto* item = new QListWidgetItem(tr("%1 · %2; проверьте прямой маршрут")
-            .arg(domain.value, issue), candidates_);
-        item->setData(Qt::UserRole, domain.value);
+            .arg(candidate.domain, issue), candidates_);
+        item->setData(Qt::UserRole, candidate.domain);
         item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
         item->setCheckState(Qt::Unchecked);
         ++added;
     }
     refreshCandidateView();
-    scanInfo_->setText(tr("Захват одной вкладки: %1 новых доменов; %2 запросов заблокировано браузером. "
+    scanInfo_->setText(tr("Захват одной вкладки: %1 новых доменов (из них %2 без сетевой ошибки); %3 запросов заблокировано браузером. "
                           "Кандидаты не сохраняются автоматически: отметьте нужные после проверки.")
-        .arg(added).arg(capture.value(QStringLiteral("blocked")).toInt()));
+        .arg(added).arg(observedAdded).arg(capture.value(QStringLiteral("blocked")).toInt()));
 }
 
 void QuickRouteDialog::populateProfiles() {

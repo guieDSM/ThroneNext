@@ -16,7 +16,8 @@ const issueNames = {
   html_error: 'Страница ошибки',
   http_error: 'HTTP-ошибка',
   network_error: 'Ошибка соединения',
-  browser_blocked: 'Блокировка браузером'
+  browser_blocked: 'Блокировка браузером',
+  observed_host: 'Замечен без сетевой ошибки'
 };
 
 const typeNames = {
@@ -97,21 +98,25 @@ function renderPayload(snapshot, active) {
   if (!snapshot) {
     elements.delivery.className = 'count';
     elements.delivery.textContent = 'Нет захвата';
-    elements.payloadMeta.textContent = 'Домен сайта, домены ошибок и число блокировок браузером.';
+    elements.payloadMeta.textContent = 'Домен сайта, домены ошибок и замеченные домены без ошибки.';
     empty(elements.events, 'Пока нечего передавать.');
     return;
   }
   elements.delivery.className = `count ${snapshot.delivered ? 'sent' : 'unsent'}`;
   elements.delivery.textContent = active ? 'Сбор данных' : snapshot.delivered ? 'Передано' : 'Не передано';
-  elements.payloadMeta.textContent = `Сайт: ${snapshot.site} · ошибок: ${snapshot.events.length}${snapshot.eventOverflow ? '+' : ''} · блокировок браузером: ${snapshot.blocked}`;
+  const observed = snapshot.observed || [];
+  elements.payloadMeta.textContent = `Сайт: ${snapshot.site} · ошибок: ${snapshot.events.length}${snapshot.eventOverflow ? '+' : ''} · замеченных: ${observed.length} · блокировок браузером: ${snapshot.blocked}`;
   elements.events.replaceChildren();
-  if (!snapshot.events.length) {
-    empty(elements.events, 'Домены с сетевыми ошибками не найдены. Throne получит адрес сайта и число блокировок.');
+  if (!snapshot.events.length && !observed.length) {
+    empty(elements.events, 'Дополнительных доменов для передачи не найдено.');
     return;
   }
   const fragment = document.createDocumentFragment();
   for (const event of snapshot.events) {
     fragment.append(row(event.host, '', issueNames[event.reason] || event.reason));
+  }
+  for (const host of observed) {
+    fragment.append(row(host, '', issueNames.observed_host));
   }
   elements.events.append(fragment);
   if (snapshot.eventOverflow) {

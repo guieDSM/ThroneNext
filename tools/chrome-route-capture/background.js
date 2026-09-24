@@ -58,11 +58,17 @@ function snapshotOf(state) {
   }));
   hosts.sort((a, b) => issuePriority(b) - issuePriority(a)
     || b.requests - a.requests || a.host.localeCompare(b.host));
+  const events = state.events.slice(0, MAX_EVENTS);
+  const eventHosts = new Set(events.map(event => event.host));
+  const observed = hosts.filter(item => item.host !== state.site
+    && !eventHosts.has(item.host) && !item.issues.includes('browser_blocked'))
+    .slice(0, MAX_EVENTS).map(item => item.host);
   return {
     site: state.site,
     hosts,
     hostOverflow: state.hostOverflow,
-    events: state.events.slice(0, MAX_EVENTS),
+    events,
+    observed,
     eventOverflow: Math.max(0, state.events.length - MAX_EVENTS),
     blocked: state.blocked,
     delivered: false,
@@ -146,7 +152,8 @@ async function stopCapture() {
 async function sendCapture() {
   const snapshot = await savedCapture();
   if (!snapshot) return {active: false, message: 'Сначала выполните захват вкладки.'};
-  const payload = JSON.stringify({site: snapshot.site, events: snapshot.events, blocked: snapshot.blocked});
+  const payload = JSON.stringify({site: snapshot.site, events: snapshot.events,
+    observed: snapshot.observed || [], blocked: snapshot.blocked});
   try {
     const response = await fetch(BRIDGE, {
       method: 'POST',
@@ -156,7 +163,7 @@ async function sendCapture() {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     snapshot.delivered = true;
     await saveCapture(snapshot);
-    return {active: false, snapshot, message: `Передано в Throne: ${snapshot.events.length} событий, блокировок браузером: ${snapshot.blocked}. Проверьте список кандидатов.`};
+    return {active: false, snapshot, message: `Передано в Throne: ${snapshot.events.length} событий с ошибками, ${snapshot.observed?.length || 0} замеченных доменов. Проверьте кандидатов перед сохранением.`};
   } catch (error) {
     snapshot.delivered = false;
     await saveCapture(snapshot);

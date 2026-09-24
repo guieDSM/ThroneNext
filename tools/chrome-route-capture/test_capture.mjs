@@ -65,6 +65,10 @@ onEvent(unrelated, 'Network.responseReceived', {requestId: 'wrong', type: 'Docum
   response: {url: 'https://example.edu/', status: 404, mimeType: 'text/html'}});
 
 const frame = {tabId: 7, sessionId: 'iframe-1'};
+onEvent(frame, 'Network.requestWillBeSent', {requestId: 'player',
+  request: {url: 'https://player.example.net/embed/example'}});
+onEvent(frame, 'Network.responseReceived', {requestId: 'player', type: 'Document',
+  response: {url: 'https://player.example.net/embed/example', status: 200, mimeType: 'text/html'}});
 onEvent(frame, 'Network.requestWillBeSent', {requestId: 'one', request: {url: 'https://example.org/player?id=private'}});
 onEvent(frame, 'Network.responseReceived', {requestId: 'one', type: 'Document',
   response: {url: 'https://example.org/player?id=private', status: 200, mimeType: 'text/html'}});
@@ -87,6 +91,7 @@ assert.equal((await message('stop')).active, false);
 assert.equal(sent.site, 'example.com');
 assert.deepEqual(JSON.parse(JSON.stringify(sent.events)), [{host: 'example.org', reason: 'html_error'}]);
 assert.equal(sent.blocked, 1);
+assert.deepEqual(sent.observed, ['player.example.net']);
 assert(!('hosts' in sent));
 assert(!JSON.stringify(sent).includes('private'));
 assert.equal((await message('status')).snapshot.delivered, true);

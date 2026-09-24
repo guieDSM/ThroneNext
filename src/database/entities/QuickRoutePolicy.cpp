@@ -420,8 +420,24 @@ namespace Configs::QuickRoute {
                 if (rules.at(i).toObject() == target) { rules.removeAt(i); removed = true; break; }
             }
             if (!removed) {
-                if (error) *error = QStringLiteral("Правило изменено вручную; автоматическое удаление отменено");
-                return false;
+                const QString kind = record.value(QStringLiteral("kind")).toString();
+                const QString selector = kind == QStringLiteral("site") ? QStringLiteral("domain_suffix")
+                    : kind == QStringLiteral("ip") ? QStringLiteral("ip_cidr")
+                    : kind == QStringLiteral("app") ? QStringLiteral("process_path") : QString{};
+                const QJsonArray wanted = target.value(selector).toArray();
+                bool selectorStillPresent = selector.isEmpty() || wanted.isEmpty();
+                for (const auto& rule : rules) {
+                    const QJsonValue existing = rule.toObject().value(selector);
+                    for (const auto& value : wanted) {
+                        if ((existing.isArray() && existing.toArray().contains(value)) || existing == value)
+                            selectorStillPresent = true;
+                    }
+                }
+                if (selectorStillPresent) {
+                    if (error) *error = QStringLiteral("Правило изменено вручную; автоматическое удаление отменено");
+                    return false;
+                }
+                // The raw rule was removed separately. Its menu record can still be deleted.
             }
             root["rules"] = rules;
             profile.rawRoute = QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Indented));
@@ -437,6 +453,33 @@ namespace Configs::QuickRoute {
             }
         }
         return true;
+    }
+
+    QList<BrowserCaptureCandidate> readBrowserCaptureCandidates(const QJsonObject& capture,
+                                                                 const QString& mainDomain) {
+        QList<BrowserCaptureCandidate> result;
+        QSet<QString> seen;
+        const auto add = [&](const QString& host, const QString& reason) {
+            const Target domain = parseSiteOrIp(host);
+            if (domain.kind != QStringLiteral("site") || domain.value == mainDomain ||
+                seen.contains(domain.value)) return;
+            seen.insert(domain.value);
+            result.append({domain.value, reason});
+        };
+
+        const QJsonArray events = capture.value(QStringLiteral("events")).toArray();
+        for (int index = 0; index < events.size() && index < 100; ++index) {
+            const QJsonObject event = events.at(index).toObject();
+            const QString reason = event.value(QStringLiteral("reason")).toString();
+            if (reason == QStringLiteral("html_error") || reason == QStringLiteral("http_error") ||
+                reason == QStringLiteral("network_error"))
+                add(event.value(QStringLiteral("host")).toString(), reason);
+        }
+
+        const QJsonArray observed = capture.value(QStringLiteral("observed")).toArray();
+        for (int index = 0; index < observed.size() && index < 100; ++index)
+            add(observed.at(index).toString(), QStringLiteral("observed_host"));
+        return result;
     }
 
     QList<QJsonObject> readRecords(const QString& json) {

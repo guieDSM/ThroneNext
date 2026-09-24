@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Throne: проверка маршрута вкладки",
-  "version": "0.2.0",
-  "description": "Показывает домены запросов выбранной вкладки и передаёт сетевые ошибки в Throne.",
+  "version": "0.3.0",
+  "description": "Показывает домены выбранной вкладки и передаёт в Throne ошибки и замеченные домены.",
   "minimum_chrome_version": "125",
   "permissions": ["debugger", "tabs", "activeTab", "storage"],
   "host_permissions": ["http://127.0.0.1:18472/*"],
