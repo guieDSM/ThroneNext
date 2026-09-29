@@ -1,4 +1,16 @@
-# Throne Next — исходный код Windows-форка
+# Throne Next — Windows-форк
+
+## Скачать и установить на Windows x64
+
+Скачайте [ThroneNext-Windows-x64-Setup.exe](ThroneNext-Windows-x64-Setup.exe) и запустите его. Установщик создаёт ярлыки «Throne Next» на рабочем столе и в меню «Пуск». Для закрепления на панели задач запустите приложение, затем выберите «Закрепить на панели задач» в меню его значка. Сам `Throne.exe` находится в `%LOCALAPPDATA%\Programs\ThroneNext` и использует соседние DLL и `ThroneCore.exe`, поэтому отдельно переносить его на рабочий стол не следует.
+
+Сборка чистая: ваши VPN-профили, подписки и настройки в неё не включены. При первом запуске добавьте свою подписку или импортируйте профили. При повторной установке в ту же папку существующая база настроек сохраняется; удаление приложения также оставляет её в папке `config`.
+
+Исходники и способ собрать установщик описаны в [packaging/windows/README.md](packaging/windows/README.md).
+
+---
+
+# Исходный код
 
 Это подготовленный для публикации снимок исходного кода. Рабочие профили, ссылки подписок, базы данных, журналы, диагностика, локальные сборки и настройки компьютера в него не входят.
 
@@ -18,10 +30,6 @@ Supports Windows 11/10/8/7 / Linux / MacOS out of the box.
 
 ### Note on MacOS releases
 Apple platforms have a very strict security policy and since Throne does not have a signed certificate, you will have to remove the quarantine using `xattr -d com.apple.quarantine /path/to/throne.app`. Move `Throne.app` to `/Applications` before the first launch — the built-in privilege escalation opens `Terminal` to make the core setuid-root, and that step can fail while the app is still inside `~/Downloads`.
-
-### GitHub Releases (Portable ZIP)
-
-[![GitHub All Releases](https://img.shields.io/github/downloads/throneproj/Throne/total?label=downloads-total&logo=github&style=flat-square)](https://github.com/throneproj/Throne/releases)
 
 # Linux CLI installer
 ```bash
