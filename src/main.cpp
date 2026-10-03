@@ -461,6 +461,7 @@ int main(int argc, char* argv[]) {
     }
     if (!wd.exists()) wd.mkpath(wd.absolutePath());
     if (!wd.exists("config")) wd.mkdir("config");
+    const QString selectedDataRoot = wd.absolutePath();
     const QString configDir = wd.absoluteFilePath("config");
     QDir::setCurrent(configDir);
     QDir("temp").removeRecursively();
@@ -517,7 +518,7 @@ int main(int argc, char* argv[]) {
     if (Configs::dataManager->settingsRepo->argv.contains("-flag_restart_dns_set")) Configs::dataManager->settingsRepo->flag_dns_set = true;
     Configs::dataManager->settingsRepo->flag_use_appdata = useAppdata;
     Configs::dataManager->settingsRepo->flag_safe_canary = safeCanary;
-    if(useAppdata && !appdataDir.isEmpty()) Configs::dataManager->settingsRepo->appdataDir = appdataDir;
+    Configs::dataManager->settingsRepo->appdataDir = selectedDataRoot;
 #ifdef NKR_CPP_DEBUG
     Configs::dataManager->settingsRepo->flag_debug = true;
 #endif

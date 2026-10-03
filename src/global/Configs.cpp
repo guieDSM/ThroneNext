@@ -1,4 +1,5 @@
 #include "include/global/Configs.hpp"
+#include "include/global/AssetPathPolicy.hpp"
 
 #include <QApplication>
 #include <QDir>
@@ -100,8 +101,9 @@ namespace Configs {
     }
 
     QString GetBasePath() {
-        if (Configs::dataManager->settingsRepo->flag_use_appdata) return QStandardPaths::writableLocation(
-              QStandardPaths::AppConfigLocation);
-        return qApp->applicationDirPath();
+        const auto& settings = *Configs::dataManager->settingsRepo;
+        return AssetBasePath(settings.appdataDir, settings.flag_use_appdata,
+                             QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation),
+                             qApp->applicationDirPath());
     }
 } // namespace Configs

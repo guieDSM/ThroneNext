@@ -605,6 +605,8 @@ if (THRONE_BUILD_DEV_TESTS)
     target_link_libraries(throne_subscription_json_test PRIVATE Qt6::Core)
     throne_add_dev_test(throne_dns_address_policy_test dev-tests/dns_address_policy_test.cpp)
     target_link_libraries(throne_dns_address_policy_test PRIVATE Qt6::Core)
+    throne_add_dev_test(throne_asset_path_policy_test dev-tests/asset_path_policy_test.cpp)
+    target_link_libraries(throne_asset_path_policy_test PRIVATE Qt6::Core)
     throne_add_dev_test(throne_ruleset_policy_test dev-tests/ruleset_policy_test.cpp)
 
     throne_add_dev_test(throne_database_insert_failure_test
@@ -641,6 +643,7 @@ if (THRONE_BUILD_DEV_TESTS)
                 throne_bounded_download_test
                 throne_subscription_json_test
                 throne_dns_address_policy_test
+                throne_asset_path_policy_test
                 throne_ruleset_policy_test
                 throne_database_insert_failure_test
                 throne_simple_route_input_policy_test
