@@ -57,6 +57,7 @@ private:
         // both empty but must let the core pick "proxy" over the config default.
         bool useDefaultOutbound = false;
         bool testCurrent = false;
+        quint64 runningGeneration = 0;
     };
 
     void runLatencyGroup(LatencyKind kind, const QList<int>& requestedIDs,

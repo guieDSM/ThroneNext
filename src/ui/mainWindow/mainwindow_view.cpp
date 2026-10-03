@@ -358,6 +358,7 @@ void MainWindow::url_test_current() {
         libcore::TestReq req;
         req.test_current = true;
         req.url = Configs::dataManager->settingsRepo->test_latency_url.toStdString();
+        req.test_timeout_ms = Configs::dataManager->settingsRepo->url_test_timeout_ms;
 
         bool rpcOK;
         auto result = API::defaultClient->Test(&rpcOK, req);

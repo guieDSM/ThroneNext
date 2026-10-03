@@ -142,6 +142,7 @@ void TestRunner::runUrlProbe(const Target& target) {
 
     libcore::TestReq req;
     fillCommonTestReq(req, target);
+    req.test_current = target.testCurrent;
     req.url = Configs::dataManager->settingsRepo->test_latency_url.toStdString();
     req.max_concurrency = Configs::dataManager->settingsRepo->test_concurrent;
     req.test_timeout_ms = Configs::dataManager->settingsRepo->url_test_timeout_ms;
@@ -151,7 +152,7 @@ void TestRunner::runUrlProbe(const Target& target) {
     libcore::TestResp result;
     {
         // The core's buffer is global: a poll can take a sibling's results, reclaimed below.
-        ResultPoller poller([this, gen = sessionGen_.load(), tag2entID = target.tag2entID] {
+        auto poll = [this, gen = sessionGen_.load(), tag2entID = target.tag2entID] {
             if (sessionGen_.load() != gen) return;
             bool ok = false;
             const auto resp = defaultClient->QueryURLTest(&ok);
@@ -171,9 +172,24 @@ void TestRunner::runUrlProbe(const Target& target) {
             if (updated.isEmpty()) return;
             mw_->UpdateDataView(true);
             runOnUiThread([=, this] { mw_->refresh_proxy_list(updated); });
-        }, kLatencyPollIntervalMs);
+        };
+        // A live-profile probe returns one result directly. Polling the global
+        // batch buffer could consume another profile's progress during a sweep.
+        std::unique_ptr<ResultPoller> poller;
+        if (!target.testCurrent) poller = std::make_unique<ResultPoller>(poll, kLatencyPollIntervalMs);
 
         result = defaultClient->Test(&rpcOK, req, &coreError);
+    }
+
+    if (target.testCurrent) {
+        bool stillRunning = false;
+        runOnUiThread([&] {
+            stillRunning = mw_->running != nullptr && mw_->running->id == target.entID
+                && mw_->profile_start_generation.load() == target.runningGeneration;
+        }, true);
+        if (!stillRunning) return;
+        mw_->dataViewHtmlGenerator_.addTestProgress();
+        mw_->UpdateDataView();
     }
 
     if (!rpcOK || result.results.empty()) {
@@ -203,6 +219,9 @@ void TestRunner::runUrlProbe(const Target& target) {
             continue;
         }
         applyUrlResult(ent, res);
+    }
+    if (target.testCurrent) {
+        runOnUiThread([this, entID = target.entID] { mw_->refresh_proxy_list({entID}); });
     }
 }
 
@@ -310,6 +329,28 @@ void TestRunner::runLatencyGroup(LatencyKind kind, const QList<int>& requestedID
         mw_->dataViewHtmlGenerator_.seedLatencyTest(panelKind, profileIDs.size());
         mw_->UpdateDataView(true);
 
+        QList<int> independentIDs = profileIDs;
+        if (isUrl) {
+            int runningID = -1;
+            quint64 runningGeneration = 0;
+            runOnUiThread([&] {
+                if (mw_->running != nullptr && profileIDs.contains(mw_->running->id)) {
+                    runningID = mw_->running->id;
+                    runningGeneration = mw_->profile_start_generation.load();
+                }
+            }, true);
+            if (runningID != -1) {
+                Target liveTarget;
+                liveTarget.entID = runningID;
+                liveTarget.testCurrent = true;
+                liveTarget.runningGeneration = runningGeneration;
+                testingCurrent_.store(true);
+                runUrlProbe(liveTarget);
+                testingCurrent_.store(false);
+                independentIDs.removeAll(runningID);
+            }
+        }
+
         auto runBatch = [this, isUrl](const QList<std::shared_ptr<Configs::Profile>>& profileSlice, const QList<int>& ids) {
             auto buildObject = Configs::BuildTestConfig(profileSlice);
             if (!buildObject->error.isEmpty()) {
@@ -357,13 +398,15 @@ void TestRunner::runLatencyGroup(LatencyKind kind, const QList<int>& requestedID
         };
 
         std::shared_ptr<Configs::Group> currentGroup;
-        for (int i = 0; i < profileIDs.length(); i += kTestBatchSize) {
-            if (stopRequested_.load()) break;
-            const auto profileIDsSlice = profileIDs.mid(i, kTestBatchSize);
-            auto profiles = Configs::dataManager->profilesRepo->GetProfileBatch(profileIDsSlice);
-            if (isUrl && !currentGroup && !profiles.isEmpty()) {
-                currentGroup = Configs::dataManager->groupsRepo->GetGroup(profiles[0]->gid);
+        if (isUrl) {
+            if (auto profile = Configs::dataManager->profilesRepo->GetProfile(profileIDs.front())) {
+                currentGroup = Configs::dataManager->groupsRepo->GetGroup(profile->gid);
             }
+        }
+        for (int i = 0; i < independentIDs.length(); i += kTestBatchSize) {
+            if (stopRequested_.load()) break;
+            const auto profileIDsSlice = independentIDs.mid(i, kTestBatchSize);
+            auto profiles = Configs::dataManager->profilesRepo->GetProfileBatch(profileIDsSlice);
             runBatch(profiles, profileIDsSlice);
         }
 
