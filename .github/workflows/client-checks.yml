@@ -1,0 +1,91 @@
+name: Windows client checks
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4.3.1
+      - uses: actions/setup-go@v6.5.0
+        with:
+          go-version: '1.26.5'
+          cache-dependency-path: core/server/go.sum
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: '31.1'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Generate Go RPC bindings
+        shell: bash
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2
+          cd core/server/gen
+          protoc -I . --go_out=. --go-grpc_out=. libcore.proto
+      - name: Test Go core
+        working-directory: core/server
+        run: go test ./...
+      - name: Build Windows core
+        shell: bash
+        run: |
+          export DEST="$GITHUB_WORKSPACE/deployment/windows-amd64"
+          GOOS=windows GOARCH=amd64 ./script/build_go.sh
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ThroneCore-windows-amd64
+          path: deployment/windows-amd64/
+          if-no-files-found: error
+
+  client:
+    needs: core
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4.3.1
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - uses: actions/cache@v6.1.0
+        id: qt-cache
+        with:
+          path: |
+            qt.7z
+            openssl.7z
+          key: WinQt-6.11.1-x64
+      - name: Download Qt and OpenSSL
+        if: steps.qt-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          curl -fL -o qt.7z https://github.com/throneproj/buildqt/releases/download/Qt_6.11.1/Qt_6.11.1_x64.7z
+          curl -fL -o openssl.7z https://github.com/throneproj/env_windows_legacy/releases/download/latest/openssl_x64.7z
+      - name: Configure, build and test client
+        shell: bash
+        run: |
+          7z x qt.7z
+          7z x openssl.7z
+          export CMAKE_PREFIX_PATH="$PWD/Qt/lib/cmake"
+          export OPENSSL_ROOT_DIR="$PWD/openssl"
+          mkdir build
+          cd build
+          curl -fLso srslist.h https://raw.githubusercontent.com/throneproj/routeprofiles/rule-set/srslist.h
+          cmake -GNinja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DTHRONE_BUILD_DEV_TESTS=ON ..
+          cmake --build . --target Throne throne_asset_path_policy_test --parallel 4
+          ctest --output-on-failure -R '^throne_asset_path_policy_test$'
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: ThroneCore-windows-amd64
+          path: deployment/windows-amd64
+      - name: Stage client build
+        shell: pwsh
+        run: |
+          Copy-Item -LiteralPath build/Throne.exe -Destination deployment/windows-amd64/Throne.exe
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ThroneNext-checked-windows-amd64
+          path: deployment/windows-amd64/
+          if-no-files-found: error
