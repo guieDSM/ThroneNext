@@ -418,7 +418,7 @@ func (s *server) Start(ctx context.Context, in *gen.LoadConfigReq) (out *gen.Err
 		if e != nil {
 			return E.Cause(e, "failed to create Xray outbound DNS resolver")
 		}
-		instance.SetOutboundDNS(resolver, xinternet.ParseDomainStrategy(dnsStrategy))
+		instance.SetOutboundDNS(newDiagnosticXrayResolver(resolver), xinternet.ParseDomainStrategy(dnsStrategy))
 		return nil
 	}
 

@@ -4042,6 +4042,22 @@ URL: %2</translation>
         <translation>[%1] Ошибка теста IP: %2</translation>
     </message>
     <message>
+        <source>[%1] URL test RPC failed: %2</source>
+        <translation>[%1] Не удалось выполнить проверку URL: %2</translation>
+    </message>
+    <message>
+        <source>[%1] URL test returned no results</source>
+        <translation>[%1] Проверка URL не вернула результатов</translation>
+    </message>
+    <message>
+        <source>[%1] IP test RPC failed: %2</source>
+        <translation>[%1] Не удалось выполнить проверку IP: %2</translation>
+    </message>
+    <message>
+        <source>[%1] IP test returned no results</source>
+        <translation>[%1] Проверка IP не вернула результатов</translation>
+    </message>
+    <message>
         <source>Failed to build test config for batch: </source>
         <translation>Не удалось собрать общую тестовую конфигурацию для группы: </translation>
     </message>

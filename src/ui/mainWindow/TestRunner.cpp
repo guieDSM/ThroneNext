@@ -179,7 +179,15 @@ void TestRunner::runUrlProbe(const Target& target) {
     if (!rpcOK || result.results.empty()) {
         // A failed Test RPC yields no per-result errors, so inspect it here for the
         // geo-asset prompt - the same flow profile start uses.
-        if (!rpcOK) mw_->handleXrayGeoAssetError(coreError, contextName(target.entID));
+        if (!rpcOK) {
+            if (!mw_->handleXrayGeoAssetError(coreError, contextName(target.entID))) {
+                MW_show_log(MainWindow::tr("[%1] URL test RPC failed: %2")
+                    .arg(contextName(target.entID), coreError));
+            }
+        } else {
+            MW_show_log(MainWindow::tr("[%1] URL test returned no results")
+                .arg(contextName(target.entID)));
+        }
         return;
     }
 
@@ -240,7 +248,15 @@ void TestRunner::runIpProbe(const Target& target) {
 
     if (!rpcOK || result.results.empty()) {
         // Detect missing Xray geo assets from a failed IPTest RPC (see runUrlProbe).
-        if (!rpcOK) mw_->handleXrayGeoAssetError(coreError, contextName(target.entID));
+        if (!rpcOK) {
+            if (!mw_->handleXrayGeoAssetError(coreError, contextName(target.entID))) {
+                MW_show_log(MainWindow::tr("[%1] IP test RPC failed: %2")
+                    .arg(contextName(target.entID), coreError));
+            }
+        } else {
+            MW_show_log(MainWindow::tr("[%1] IP test returned no results")
+                .arg(contextName(target.entID)));
+        }
         return;
     }
 
