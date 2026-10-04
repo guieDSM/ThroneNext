@@ -94,9 +94,12 @@ jobs:
         shell: pwsh
         run: |
           Copy-Item -LiteralPath build/Throne.exe -Destination deployment/windows-amd64/Throne.exe
-          & "$PWD/Qt/bin/windeployqt.exe" --release --dir deployment/windows-amd64 deployment/windows-amd64/Throne.exe
+          # The release Qt archive links Qt statically; windeployqt cannot
+          # recognize that executable. Ensure no dynamic Qt runtime is needed.
+          $dependencies = & dumpbin /dependents deployment/windows-amd64/Throne.exe | Out-String
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          foreach ($required in @('Throne.exe', 'ThroneCore.exe', 'Qt6Core.dll', 'platforms/qwindows.dll', 'libcronet.dll')) {
+          if ($dependencies -match 'Qt6\w*\.dll') { throw 'Client unexpectedly requires dynamic Qt libraries' }
+          foreach ($required in @('Throne.exe', 'ThroneCore.exe', 'libcronet.dll', 'updater.exe')) {
             if (-not (Test-Path -LiteralPath (Join-Path deployment/windows-amd64 $required))) {
               throw "Missing packaged runtime file: $required"
             }
