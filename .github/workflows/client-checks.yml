@@ -30,7 +30,17 @@ jobs:
           protoc -I . --go_out=. --go-grpc_out=. libcore.proto
       - name: Test Go core
         working-directory: core/server
-        run: go test ./...
+        shell: pwsh
+        run: |
+          # winipcfg integration tests change a real network adapter, which
+          # hosted runners do not provide. Compile that package without running
+          # its adapter tests; run all other Go tests normally.
+          $packages = go list ./... | Where-Object { $_ -ne 'ThroneCore/internal/boxdns/winipcfg' }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test $packages
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test -run '^$' ./internal/boxdns/winipcfg
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build Windows core
         shell: bash
         run: |
