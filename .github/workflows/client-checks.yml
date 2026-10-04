@@ -94,6 +94,13 @@ jobs:
         shell: pwsh
         run: |
           Copy-Item -LiteralPath build/Throne.exe -Destination deployment/windows-amd64/Throne.exe
+          & "$PWD/Qt/bin/windeployqt.exe" --release --dir deployment/windows-amd64 deployment/windows-amd64/Throne.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($required in @('Throne.exe', 'ThroneCore.exe', 'Qt6Core.dll', 'platforms/qwindows.dll', 'libcronet.dll')) {
+            if (-not (Test-Path -LiteralPath (Join-Path deployment/windows-amd64 $required))) {
+              throw "Missing packaged runtime file: $required"
+            }
+          }
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: ThroneNext-checked-windows-amd64
